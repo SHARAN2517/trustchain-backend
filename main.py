@@ -172,7 +172,7 @@ def load_model(name: str, model: nn.Module, file_name: str):
 
     try:
         state = torch.load(path, map_location=device)
-        model.load_state_dict(state)
+        model.load_state_dict(state, strict=True)
         model.eval()
         MODELS[name] = model
         MODEL_STATUS[name] = "loaded"
@@ -332,10 +332,13 @@ async def predict(
 @app.post("/feedback")
 async def feedback(data: dict):
     feedback_store.append(data)
-    triggered = len(feedback_store) >= 50
+    total = len(feedback_store)
+    triggered = total >= 50
+    remaining = max(0, 50 - total)
+
     return {
         "received": True,
-        "total": len(feedback_store),
+        "total": total,
         "fine_tune_triggered": triggered,
-        "message": "Fine-tune triggered!" if triggered else f"{50 - len(feedback_store)} more needed",
+        "message": "Fine-tune triggered!" if triggered else f"{remaining} more needed",
     }
