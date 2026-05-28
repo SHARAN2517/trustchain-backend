@@ -11,7 +11,12 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
-app = FastAPI(title="TrustChain-Med AI")
+app = FastAPI(
+    title="TrustChain-Med AI",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
