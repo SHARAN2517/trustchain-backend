@@ -192,14 +192,27 @@ print("Model status:", MODEL_STATUS)
 feedback_store = []
 
 
+def get_default_available_specialty() -> str:
+    preferred_order = ["Radiology", "Oncology", "Pediatrics", "Cardiology"]
+    for specialty in preferred_order:
+        if specialty in MODELS:
+            return specialty
+    return "Oncology"
+
+
 def detect_specialty(note: str, filename: str = "") -> str:
     text = (note + " " + filename).lower()
     scores = {
         specialty: sum(1 for kw in keywords if kw in text)
         for specialty, keywords in SPECIALTY_KEYWORDS.items()
     }
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "Radiology"
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+    for specialty, score in ranked:
+        if score > 0 and specialty in MODELS:
+            return specialty
+
+    return get_default_available_specialty()
 
 
 def confidence_tier(prob: float) -> dict:
@@ -231,6 +244,7 @@ def root():
         "status": "TrustChain-Med AI running",
         "models": list(MODELS.keys()),
         "model_status": MODEL_STATUS,
+        "default_specialty": get_default_available_specialty(),
     }
 
 
@@ -241,6 +255,7 @@ def health():
         "models_loaded": list(MODELS.keys()),
         "model_status": MODEL_STATUS,
         "feedback_count": len(feedback_store),
+        "default_specialty": get_default_available_specialty(),
     }
 
 
@@ -268,6 +283,7 @@ def system_status():
         },
         "rlhf_store": len(feedback_store),
         "model_status": MODEL_STATUS,
+        "default_specialty": get_default_available_specialty(),
     }
 
 
@@ -285,6 +301,7 @@ async def predict(
             "error": f"Model for '{spec}' is not available",
             "available_models": list(MODELS.keys()),
             "model_status": MODEL_STATUS,
+            "suggested_specialty": get_default_available_specialty(),
         }
 
     if file and file.filename:
