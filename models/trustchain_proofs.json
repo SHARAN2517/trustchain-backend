@@ -1,0 +1,318 @@
+[
+  {
+    "hospital_id": 0,
+    "weight_hash": "2c51e7ab6a0a9f8d1dd8448735e1abf1d95bef84a91e292cd5692924c71a91bd",
+    "num_samples_trained": 250,
+    "commitments": [
+      {
+        "sample_id": 0,
+        "input_hash": "790a905599f8ab66",
+        "output_commitment": "02ec07f66ac8ffda2e78428d323a719b",
+        "top_diagnosis": 7,
+        "confidence": 0.11087454855442047
+      },
+      {
+        "sample_id": 1,
+        "input_hash": "c60c4d7b0dfc132e",
+        "output_commitment": "3f891b0d02886ccb8d89de79d7ede45c",
+        "top_diagnosis": 3,
+        "confidence": 0.10752963274717331
+      },
+      {
+        "sample_id": 2,
+        "input_hash": "a1bc1050c35b49c0",
+        "output_commitment": "38fec90b36de649362cf8609de270f51",
+        "top_diagnosis": 7,
+        "confidence": 0.10685364902019501
+      },
+      {
+        "sample_id": 3,
+        "input_hash": "456dea4d87e8cd28",
+        "output_commitment": "32dbd6db1154673a95e67ff8f0df01eb",
+        "top_diagnosis": 1,
+        "confidence": 0.10096527636051178
+      },
+      {
+        "sample_id": 4,
+        "input_hash": "a0bee5f93e6ce353",
+        "output_commitment": "f43c987cde484deae0aefedc5aeaadd7",
+        "top_diagnosis": 5,
+        "confidence": 0.10011956840753555
+      },
+      {
+        "sample_id": 5,
+        "input_hash": "59ec7c9f9c4961a7",
+        "output_commitment": "9dba30762b6bda7fa3b1c1278d3ea857",
+        "top_diagnosis": 12,
+        "confidence": 0.09417334198951721
+      },
+      {
+        "sample_id": 6,
+        "input_hash": "7b218e847aa987ff",
+        "output_commitment": "6ed62683e3ff026bc24ebd57fa1e5b0b",
+        "top_diagnosis": 12,
+        "confidence": 0.09465202689170837
+      },
+      {
+        "sample_id": 7,
+        "input_hash": "6a011424209a4172",
+        "output_commitment": "ce32fb8c97dd9129c9fee221fc359419",
+        "top_diagnosis": 1,
+        "confidence": 0.09412556886672974
+      },
+      {
+        "sample_id": 8,
+        "input_hash": "29da82b80d515717",
+        "output_commitment": "0c5fb854c8a4b9aac68997de12071fc1",
+        "top_diagnosis": 1,
+        "confidence": 0.12185629457235336
+      },
+      {
+        "sample_id": 9,
+        "input_hash": "cc1a1fc2f74e4f0c",
+        "output_commitment": "ade45a559c9b1374913ba28d9bf0ea21",
+        "top_diagnosis": 5,
+        "confidence": 0.10155586898326874
+      }
+    ],
+    "signature": "ecf8c9c69d61527964bb10ee30fd66c65b47c1bbe3bd3810af6b84994697bf98",
+    "proof_version": "TrustChain-PoC-v1"
+  },
+  {
+    "hospital_id": 1,
+    "weight_hash": "2c51e7ab6a0a9f8d1dd8448735e1abf1d95bef84a91e292cd5692924c71a91bd",
+    "num_samples_trained": 250,
+    "commitments": [
+      {
+        "sample_id": 0,
+        "input_hash": "0d834d178a2f3d0f",
+        "output_commitment": "fe1ea8e3cbf4077652dfd745db639aae",
+        "top_diagnosis": 3,
+        "confidence": 0.13672268390655518
+      },
+      {
+        "sample_id": 1,
+        "input_hash": "9bf7950c4b2b3ef5",
+        "output_commitment": "4b93842f3c306cbca38571955ac59ba1",
+        "top_diagnosis": 1,
+        "confidence": 0.12037904560565948
+      },
+      {
+        "sample_id": 2,
+        "input_hash": "dad17c3d383d66f7",
+        "output_commitment": "150f37ae12ea56914c4a52275ca75fa3",
+        "top_diagnosis": 5,
+        "confidence": 0.09894905239343643
+      },
+      {
+        "sample_id": 3,
+        "input_hash": "ac0207b785186c53",
+        "output_commitment": "eed0fd24a8ea047a79c8b061577c223c",
+        "top_diagnosis": 5,
+        "confidence": 0.11116109788417816
+      },
+      {
+        "sample_id": 4,
+        "input_hash": "1987d358dd49ee95",
+        "output_commitment": "df43d65fa4bbe5685702c9f0ea3aa369",
+        "top_diagnosis": 13,
+        "confidence": 0.09875139594078064
+      },
+      {
+        "sample_id": 5,
+        "input_hash": "d584d07b16f7b702",
+        "output_commitment": "852716d9c6778b59af30d4bbf27a44fd",
+        "top_diagnosis": 12,
+        "confidence": 0.1289186179637909
+      },
+      {
+        "sample_id": 6,
+        "input_hash": "d5d40afb73fdf23b",
+        "output_commitment": "69f6335bbc3ba5dfc24f91ed1f9c2067",
+        "top_diagnosis": 3,
+        "confidence": 0.12057866901159286
+      },
+      {
+        "sample_id": 7,
+        "input_hash": "a38d5da317e01fcd",
+        "output_commitment": "ad9b3058bab9653b91625eeaf5670783",
+        "top_diagnosis": 1,
+        "confidence": 0.14092214405536652
+      },
+      {
+        "sample_id": 8,
+        "input_hash": "5854d60590944eef",
+        "output_commitment": "bf291990bb00efaab224f88b69c034d1",
+        "top_diagnosis": 13,
+        "confidence": 0.10703397542238235
+      },
+      {
+        "sample_id": 9,
+        "input_hash": "cbc35e7c0512400c",
+        "output_commitment": "939f6b46871d5783ac862c898ebe0ff8",
+        "top_diagnosis": 5,
+        "confidence": 0.13165687024593353
+      }
+    ],
+    "signature": "ab64710bf5e00c296a0b4141108f9ace04e81c45affb2483300e7a43e3028e76",
+    "proof_version": "TrustChain-PoC-v1"
+  },
+  {
+    "hospital_id": 2,
+    "weight_hash": "2c51e7ab6a0a9f8d1dd8448735e1abf1d95bef84a91e292cd5692924c71a91bd",
+    "num_samples_trained": 250,
+    "commitments": [
+      {
+        "sample_id": 0,
+        "input_hash": "1729a4739a0b317c",
+        "output_commitment": "e728c2d94b68238ea4058ee4b25aeeeb",
+        "top_diagnosis": 3,
+        "confidence": 0.10193964093923569
+      },
+      {
+        "sample_id": 1,
+        "input_hash": "8f2826d24edeb9d0",
+        "output_commitment": "52919d87879a9755e137b0bab6723afa",
+        "top_diagnosis": 5,
+        "confidence": 0.11117476224899292
+      },
+      {
+        "sample_id": 2,
+        "input_hash": "d823f922562bd7ff",
+        "output_commitment": "88282d765ec7ed2754fa9c1fbd83414c",
+        "top_diagnosis": 13,
+        "confidence": 0.10447782278060913
+      },
+      {
+        "sample_id": 3,
+        "input_hash": "3349f9fa991067e6",
+        "output_commitment": "9584602ad2d0a28d56fa6b22eedd29b4",
+        "top_diagnosis": 5,
+        "confidence": 0.09988364577293396
+      },
+      {
+        "sample_id": 4,
+        "input_hash": "babefd1317522473",
+        "output_commitment": "424b34964fa38c030551238e462a3ac9",
+        "top_diagnosis": 5,
+        "confidence": 0.10297078639268875
+      },
+      {
+        "sample_id": 5,
+        "input_hash": "d513660a4fd8fb04",
+        "output_commitment": "251a757d3ddc6aec65c6e68e3cf889a2",
+        "top_diagnosis": 7,
+        "confidence": 0.10919404774904251
+      },
+      {
+        "sample_id": 6,
+        "input_hash": "16b4bbc7968be9dd",
+        "output_commitment": "b7e1e454a18c3f597aeed5f04ce6cf36",
+        "top_diagnosis": 11,
+        "confidence": 0.11405909061431885
+      },
+      {
+        "sample_id": 7,
+        "input_hash": "9e100506129b21ae",
+        "output_commitment": "82187cc04c2b359cec4895d8b5f679aa",
+        "top_diagnosis": 13,
+        "confidence": 0.0946393832564354
+      },
+      {
+        "sample_id": 8,
+        "input_hash": "a2c1a7d90710128d",
+        "output_commitment": "4c0764744c48373355c0f361624d4248",
+        "top_diagnosis": 1,
+        "confidence": 0.10699613392353058
+      },
+      {
+        "sample_id": 9,
+        "input_hash": "0867216698a6e9f1",
+        "output_commitment": "ca829449e8ceee7ab68e86555e04c0a6",
+        "top_diagnosis": 3,
+        "confidence": 0.09049177914857864
+      }
+    ],
+    "signature": "7cbad48150ce16150137d2f06ed6e5813953c3c7f741c5a0558835c54e38fb75",
+    "proof_version": "TrustChain-PoC-v1"
+  },
+  {
+    "hospital_id": 3,
+    "weight_hash": "2c51e7ab6a0a9f8d1dd8448735e1abf1d95bef84a91e292cd5692924c71a91bd",
+    "num_samples_trained": 250,
+    "commitments": [
+      {
+        "sample_id": 0,
+        "input_hash": "079a7568f993eed0",
+        "output_commitment": "22db140e8966a071beceb262582b22a6",
+        "top_diagnosis": 5,
+        "confidence": 0.11692644655704498
+      },
+      {
+        "sample_id": 1,
+        "input_hash": "0193d2c0f174301e",
+        "output_commitment": "3142e60d3a19cbc7382c0a71f4072456",
+        "top_diagnosis": 1,
+        "confidence": 0.10904663801193237
+      },
+      {
+        "sample_id": 2,
+        "input_hash": "5414cbcf017d8cb9",
+        "output_commitment": "6f3fe11f1b4073dbdf04d8bcf0630418",
+        "top_diagnosis": 13,
+        "confidence": 0.11540834605693817
+      },
+      {
+        "sample_id": 3,
+        "input_hash": "3f82c7881720def2",
+        "output_commitment": "f37ce261d3462c7a2d893faaeff6efb0",
+        "top_diagnosis": 3,
+        "confidence": 0.10564467310905457
+      },
+      {
+        "sample_id": 4,
+        "input_hash": "88feb17b40fcb75b",
+        "output_commitment": "ec8d7f48c6ae0d34a5d7d120ec47f2a8",
+        "top_diagnosis": 5,
+        "confidence": 0.09616034477949142
+      },
+      {
+        "sample_id": 5,
+        "input_hash": "2b9401cfde3728a4",
+        "output_commitment": "031ae2c975817d7ae949274d83963388",
+        "top_diagnosis": 13,
+        "confidence": 0.1142895296216011
+      },
+      {
+        "sample_id": 6,
+        "input_hash": "e77f74e40f653b33",
+        "output_commitment": "6c2b9862852d68580f803cb9eafea7bb",
+        "top_diagnosis": 13,
+        "confidence": 0.10357371717691422
+      },
+      {
+        "sample_id": 7,
+        "input_hash": "90ce0eb8da7e50e1",
+        "output_commitment": "ac01944227a4ba87fa7a0de811f7d9be",
+        "top_diagnosis": 13,
+        "confidence": 0.10601000487804413
+      },
+      {
+        "sample_id": 8,
+        "input_hash": "3e64edd3f3794cea",
+        "output_commitment": "393c58997d9f14bf38e2bdeac4d50c38",
+        "top_diagnosis": 3,
+        "confidence": 0.11339219659566879
+      },
+      {
+        "sample_id": 9,
+        "input_hash": "5049f6454f68808a",
+        "output_commitment": "4d215eed18c3957718637b9a6711219c",
+        "top_diagnosis": 1,
+        "confidence": 0.10080619156360626
+      }
+    ],
+    "signature": "f065e3f2249138521f3d55bf23cc3e6764ecfab05ecd8b246095c379faf5806c",
+    "proof_version": "TrustChain-PoC-v1"
+  }
+]
