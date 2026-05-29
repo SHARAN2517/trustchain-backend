@@ -143,29 +143,54 @@ class ClinicalBERTExtractor(nn.Module):
             x = self.norm(x)
             return x[:, 0], x
 
+class CrossAttentionFusionBlock(nn.Module):
+    """Single stacked block of Cross-Attention with MLP feeds and residual norms."""
+    def __init__(self, embed_dim=768, num_heads=12, dropout=0.1):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim * 4, embed_dim),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, q_img, k_txt, v_txt):
+        attn_out, attn_weights = self.multihead_attn(q_img, k_txt, v_txt)
+        x = self.norm1(q_img + attn_out)
+        mlp_out = self.mlp(x)
+        x = self.norm2(x + mlp_out)
+        return x, attn_weights
+
 class CrossAttentionFusion(nn.Module):
     """
-    Clinical Cross-Attention Fusion layer.
-    Queries the Vision CLS token (Q) against the entire ClinicalBERT sequence features (K, V).
-    Aligns visual pathology margins with specific clinical phrases.
+    Advanced Multimodal Stacked Cross-Attention Fusion engine.
+    Queries the Vision CLS token iteratively through 3 stacked attention-MLP layers,
+    forming highly refined joint semantic visual-language context.
     """
-    def __init__(self, embed_dim=768, num_heads=12):
+    def __init__(self, embed_dim=768, num_heads=12, depth=3):
         super().__init__()
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        self.norm_img = nn.LayerNorm(embed_dim)
-        self.norm_txt = nn.LayerNorm(embed_dim)
+        self.depth = depth
+        self.blocks = nn.ModuleList([
+            CrossAttentionFusionBlock(embed_dim, num_heads)
+            for _ in range(depth)
+        ])
         
     def forward(self, img_cls, txt_seq):
-        # Query: [B, 1, 768] derived from Image CLS
         q = img_cls.unsqueeze(1)
-        # Key & Value: [B, L, 768] derived from full ClinicalBERT sequence
         k = txt_seq
         v = txt_seq
         
-        attn_out, attn_weights = self.multihead_attn(q, k, v)
-        # Squeeze query dimension and add residual connection
-        fused = self.norm_img(img_cls + attn_out.squeeze(1))
-        return fused, attn_weights
+        last_attn = None
+        for block in self.blocks:
+            q, last_attn = block(q, k, v)
+            
+        return q.squeeze(1), last_attn
+
 
 class TrustChainMedModel(nn.Module):
     """

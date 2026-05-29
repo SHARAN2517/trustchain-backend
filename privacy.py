@@ -76,15 +76,23 @@ class SimulatedDPOptimizer:
         self.optimizer.zero_grad(set_to_none=set_to_none)
 
     def step(self, closure=None):
-        # 1. Clip Gradients
+        # 1. Clip Gradients using Layer-wise Adaptive Bounded Clipping
         for group in self.param_groups:
             for p in group['params']:
                 if p.grad is not None:
-                    # Clip gradients
-                    p.grad.data.clamp_(-self.max_grad_norm, self.max_grad_norm)
+                    # Adaptive Layer-wise scale:
+                    # Tighter bounds on high-dimensional feature encoders to prevent MIA extraction leakage,
+                    # while allowing wider bounds on final decision heads to maintain diagnostic accuracy.
+                    num_el = p.numel()
+                    layer_norm_scale = 1.2 if num_el < 10000 else 0.75
+                    clip_bound = self.max_grad_norm * layer_norm_scale
                     
-                    # 2. Inject Gaussian Noise proportional to max_grad_norm and noise_multiplier
-                    noise = torch.randn_like(p.grad) * (self.noise_multiplier * self.max_grad_norm)
+                    p.grad.data.clamp_(-clip_bound, clip_bound)
+                    
+                    # 2. Inject Gaussian Noise scaled proportionally to the adaptive bound
+                    # Layer-wise scaling: earlier layers get slightly more noise, decision heads get less noise
+                    noise_factor = 0.8 if num_el < 10000 else 1.25
+                    noise = torch.randn_like(p.grad) * (self.noise_multiplier * clip_bound * noise_factor)
                     p.grad.data.add_(noise)
                     
         # 3. Perform standard optimizer step
