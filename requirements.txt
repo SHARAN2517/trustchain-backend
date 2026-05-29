@@ -6,3 +6,6 @@ torchvision==0.16.0
 Pillow==10.1.0
 numpy==1.26.2
 pydantic==2.5.2
+pydicom==2.4.4
+grad-cam==1.5.5
+opencv-python==4.10.0.84

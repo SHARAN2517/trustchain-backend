@@ -1,7 +1,11 @@
 import hashlib
 import hmac
 import io
+import base64
+import json
 import os
+import sqlite3
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -9,9 +13,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from pytorch_grad_cam import GradCAMPlusPlus
+from pytorch_grad_cam.utils.image import show_cam_on_image
 
 app = FastAPI(
     title="TrustChain-Med AI",
@@ -197,8 +203,51 @@ except Exception as e:
 print("All models:", MODEL_STATUS)
 
 feedback_store = []
+DB_PATH = "trustchain.db"
 
 # ── Helper functions ──
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id TEXT NOT NULL,
+                hospital_id TEXT NOT NULL,
+                specialty TEXT NOT NULL,
+                diagnosis TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                tier TEXT NOT NULL,
+                modality TEXT,
+                proof_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_proofs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hospital_id TEXT NOT NULL,
+                weight_hash TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                tx_id TEXT NOT NULL UNIQUE,
+                tier TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+init_db()
 
 def get_default_specialty():
     for s in ["Radiology","Oncology","Pediatrics","Cardiology"]:
@@ -259,6 +308,124 @@ def generate_proof(specialty, note):
     return {"weight_hash":wh[:32],"signature":sig[:16],
             "verified":True,"hospitals_signed":4}
 
+def load_dicom_image(raw: bytes) -> Image.Image:
+    try:
+        import pydicom
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail="DICOM support needs pydicom. Install requirements.txt and retry.",
+        ) from exc
+
+    ds = pydicom.dcmread(io.BytesIO(raw))
+    pixels = ds.pixel_array.astype(np.float32)
+    if pixels.ndim == 3:
+        pixels = pixels[0]
+
+    center = getattr(ds, "WindowCenter", float(pixels.mean()))
+    width = getattr(ds, "WindowWidth", float(pixels.std() * 4 or 1))
+    if isinstance(center, pydicom.multival.MultiValue):
+        center = float(center[0])
+    if isinstance(width, pydicom.multival.MultiValue):
+        width = float(width[0])
+
+    low, high = float(center) - float(width) / 2, float(center) + float(width) / 2
+    if high <= low:
+        low, high = float(pixels.min()), float(pixels.max() or 1)
+    pixels = np.clip(pixels, low, high)
+    pixels = ((pixels - low) / max(high - low, 1e-6) * 255).astype(np.uint8)
+    return Image.fromarray(pixels).convert("RGB")
+
+async def load_upload_image(file: Optional[UploadFile]) -> Image.Image:
+    if not file or not file.filename:
+        return Image.new("RGB", (64, 64), (100, 120, 140))
+
+    raw = await file.read()
+    name = file.filename.lower()
+    try:
+        if name.endswith(".dcm") or file.content_type == "application/dicom":
+            return load_dicom_image(raw)
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except HTTPException:
+        raise
+    except Exception:
+        return Image.new("RGB", (64, 64), (128, 128, 128))
+
+def image_to_base64(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+def record_prediction(patient_id, hospital_id, specialty, diagnosis, confidence, tier, modality, proof):
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO predictions (
+                patient_id, hospital_id, specialty, diagnosis, confidence,
+                tier, modality, proof_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                patient_id,
+                hospital_id,
+                specialty,
+                diagnosis,
+                confidence,
+                tier,
+                modality,
+                json.dumps(proof),
+                utc_now(),
+            ),
+        )
+
+def format_prediction_row(row):
+    data = dict(row)
+    proof_json = data.pop("proof_json", "{}")
+    data["proof"] = json.loads(proof_json)
+    return data
+
+def submit_audit_proof(hospital_id, proof):
+    tier = "BASIC"
+    tx_seed = f"{hospital_id}:{proof['weight_hash']}:{proof['signature']}:{utc_now()}"
+    tx_id = hashlib.sha256(tx_seed.encode()).hexdigest()[:24]
+    with get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS total FROM audit_proofs WHERE hospital_id = ?",
+            (hospital_id,),
+        ).fetchone()["total"] + 1
+        if count >= 25:
+            tier = "PRIORITY"
+        elif count >= 10:
+            tier = "PREMIUM"
+        conn.execute(
+            """
+            INSERT INTO audit_proofs (
+                hospital_id, weight_hash, signature, tx_id, tier, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (hospital_id, proof["weight_hash"], proof["signature"], tx_id, tier, utc_now()),
+        )
+    return {"tx_id": tx_id, "on_chain": False, "network": "local-audit", "tier": tier}
+
+def explain_note_tokens(note: str):
+    clinical_terms = {
+        "opacity", "mass", "nodule", "pneumonia", "tumor", "malignant",
+        "arrhythmia", "effusion", "edema", "biopsy", "carcinoma", "fever",
+        "infant", "heart", "lung", "chest", "xray", "x-ray",
+    }
+    tokens = []
+    for raw in note.split():
+        clean = raw.strip(".,;:()[]{}").lower()
+        score = 0.15
+        if clean in clinical_terms:
+            score = 0.9
+        elif any(clean in kws for kws in SPECIALTY_KEYWORDS.values()):
+            score = 0.65
+        elif len(clean) > 8:
+            score = 0.35
+        tokens.append({"token": raw, "importance": round(score, 2)})
+    return tokens[:80]
+
 # ── Routes ──
 
 @app.get("/")
@@ -308,16 +475,11 @@ async def predict(
     file: Optional[UploadFile] = File(None),
     note: str = Form("Chest X-ray report."),
     specialty: str = Form("Auto-detect"),
+    patient_id: str = Form("anonymous"),
+    hospital_id: str = Form("hospital-demo"),
 ):
     # ── Load image ──
-    if file and file.filename:
-        try:
-            raw = await file.read()
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
-        except:
-            img = Image.new("RGB",(64,64),(128,128,128))
-    else:
-        img = Image.new("RGB",(64,64),(100,120,140))
+    img = await load_upload_image(file)
 
     # ── Step 1: Image quality check ──
     quality = check_image_quality(img)
@@ -378,17 +540,34 @@ async def predict(
     top_prob = float(probs[top5[0]])
     proof    = generate_proof(spec, note)
     tier     = confidence_tier(top_prob, is_ood, quality["quality_ok"])
+    blockchain_tx = submit_audit_proof(hospital_id, proof)
+    confidence_pct = round(top_prob*100, 1)
+    primary_diagnosis = classes[top5[0]]
+
+    record_prediction(
+        patient_id=patient_id,
+        hospital_id=hospital_id,
+        specialty=spec,
+        diagnosis=primary_diagnosis,
+        confidence=confidence_pct,
+        tier=tier["tier"],
+        modality=modality_info.get("detected"),
+        proof=proof,
+    )
 
     return {
+        "patient_id":          patient_id,
+        "hospital_id":         hospital_id,
         "specialty":          spec,
-        "primary_diagnosis":  classes[top5[0]],
-        "confidence":         round(top_prob*100, 1),
+        "primary_diagnosis":  primary_diagnosis,
+        "confidence":         confidence_pct,
         "tier":               tier,
         "differentials": [
             {"class":classes[i],"probability":round(float(probs[i])*100,1)}
             for i in top5
         ],
         "proof":              proof,
+        "blockchain_tx":      blockchain_tx,
         "modality_detection": modality_info,
         "ood_detected":       is_ood,
         "ood_message":        ood_msg,
@@ -406,3 +585,127 @@ async def feedback(data: dict):
             "fine_tune_triggered":triggered,
             "message":"Fine-tune triggered!" if triggered
                       else f"{50-total} more needed"}
+
+@app.get("/history/{patient_id}")
+async def history(patient_id: str, limit: int = 20):
+    limit = max(1, min(limit, 100))
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, patient_id, hospital_id, specialty, diagnosis,
+                   confidence, tier, modality, proof_json, created_at
+            FROM predictions
+            WHERE patient_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (patient_id, limit),
+        ).fetchall()
+    return {
+        "patient_id": patient_id,
+        "history": [format_prediction_row(row) for row in rows],
+    }
+
+@app.post("/gradcam")
+async def gradcam(
+    file: UploadFile = File(...),
+    specialty: str = Form("Radiology"),
+):
+    if specialty not in MODELS:
+        raise HTTPException(status_code=404, detail=f"Model '{specialty}' not available")
+    if specialty != "Radiology":
+        raise HTTPException(status_code=400, detail="Grad-CAM is currently available for Radiology only")
+
+    img = await load_upload_image(file)
+    inp = TRANSFORMS[specialty](img).unsqueeze(0)
+    model = MODELS[specialty]
+    model.eval()
+
+    target_layer = next(
+        (layer for layer in reversed(model.encoder) if isinstance(layer, nn.Conv2d)),
+        None,
+    )
+    if target_layer is None:
+        raise HTTPException(status_code=500, detail="No convolutional target layer found for Grad-CAM")
+
+    with GradCAMPlusPlus(model=model, target_layers=[target_layer]) as cam:
+        grayscale_cam = cam(input_tensor=inp, targets=None)[0]
+
+    height, width = inp.shape[-2:]
+    img_np = np.array(img.resize((width, height))).astype(np.float32) / 255.0
+    overlay = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
+    heatmap = Image.fromarray(overlay)
+
+    return {
+        "success": True,
+        "specialty": specialty,
+        "heatmap": image_to_base64(heatmap),
+        "target_layer": target_layer.__class__.__name__,
+        "method": "grad-cam-plus-plus",
+    }
+
+@app.post("/explain")
+async def explain(note: str = Form(...), specialty: str = Form("Auto-detect")):
+    routed = specialty
+    if routed == "Auto-detect":
+        routed = detect_specialty_from_note(note)
+    tokens = explain_note_tokens(note)
+    top = sorted(tokens, key=lambda t: t["importance"], reverse=True)[:5]
+    return {"specialty": routed, "tokens": tokens, "top_contributors": top}
+
+@app.get("/blockchain/proofs")
+async def blockchain_proofs(hospital_id: Optional[str] = None, limit: int = 25):
+    limit = max(1, min(limit, 100))
+    where = "WHERE hospital_id = ?" if hospital_id else ""
+    params = (hospital_id, limit) if hospital_id else (limit,)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT hospital_id, weight_hash, signature, tx_id, tier, created_at
+            FROM audit_proofs
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return {"proofs": [dict(row) for row in rows], "network": "local-audit"}
+
+@app.get("/reputation/{hospital_id}")
+async def reputation(hospital_id: str):
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS rounds,
+                   COALESCE(MAX(id), 0) AS latest_id
+            FROM audit_proofs
+            WHERE hospital_id = ?
+            """,
+            (hospital_id,),
+        ).fetchone()
+        latest = conn.execute(
+            """
+            SELECT tx_id, tier, created_at
+            FROM audit_proofs
+            WHERE hospital_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (hospital_id,),
+        ).fetchone()
+
+    rounds = row["rounds"]
+    if rounds >= 25:
+        tier = "PRIORITY"
+    elif rounds >= 10:
+        tier = "PREMIUM"
+    else:
+        tier = "BASIC"
+    return {
+        "hospital_id": hospital_id,
+        "rounds": rounds,
+        "tier": latest["tier"] if latest else tier,
+        "computed_tier": tier,
+        "latest_tx": latest["tx_id"] if latest else None,
+        "updated_at": latest["created_at"] if latest else None,
+    }
