@@ -628,8 +628,12 @@ async def gradcam(
     if target_layer is None:
         raise HTTPException(status_code=500, detail="No convolutional target layer found for Grad-CAM")
 
-    with GradCAMPlusPlus(model=model, target_layers=[target_layer]) as cam:
+    cam = GradCAMPlusPlus(model=model, target_layers=[target_layer])
+    try:
         grayscale_cam = cam(input_tensor=inp, targets=None)[0]
+    finally:
+        if hasattr(cam, "close"):
+            cam.close()
 
     height, width = inp.shape[-2:]
     img_np = np.array(img.resize((width, height))).astype(np.float32) / 255.0

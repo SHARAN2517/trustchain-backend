@@ -89,9 +89,9 @@ class ClinicalBERTExtractor(nn.Module):
     """
     Advanced Production-Grade ClinicalBERT Feature Extractor.
     Wraps emilyalsentzer/Bio_ClinicalBERT to extract dense contextual tokens from unstructured notes.
-    Falls back gracefully to a 12-layer deep BERT transformer if offline or transformers is missing.
+    Falls back gracefully to a smaller memory-friendly BERT transformer if offline or transformers is missing.
     """
-    def __init__(self, vocab_size=30522, embed_dim=768, depth=12, num_heads=12):
+    def __init__(self, vocab_size=256, embed_dim=768, depth=12, num_heads=12):
         super().__init__()
         self.embed_dim = embed_dim
         self.hf_active = False
