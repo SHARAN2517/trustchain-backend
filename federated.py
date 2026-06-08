@@ -127,6 +127,34 @@ class SimulatedFederation:
             
         return aggregated_weights
 
+    def _squared_distance(self, params_a, params_b):
+        """Compute squared Euclidean distance between two sets of model parameters."""
+        return sum(np.sum((a - b) ** 2) for a, b in zip(params_a, params_b))
+
+    def krum_score(self, candidate_idx, client_parameters, f=1):
+        """Assign a Krum score by summing the smallest pairwise distances."""
+        distances = []
+        for idx, params in enumerate(client_parameters):
+            if idx == candidate_idx:
+                continue
+            distances.append(self._squared_distance(client_parameters[candidate_idx], params))
+        distances.sort()
+        return sum(distances[: max(0, len(distances) - f - 2)])
+
+    def robust_aggregate(self, client_parameters, f=1, m=None):
+        """Selects robust client updates using Multi-Krum to mitigate Byzantine attacks."""
+        num_clients = len(client_parameters)
+        if num_clients < 3 + f:
+            return self.aggregate_parameters(client_parameters)
+
+        if m is None:
+            m = max(1, num_clients - 2 * f - 2)
+
+        scores = [(idx, self.krum_score(idx, client_parameters, f)) for idx in range(num_clients)]
+        selected = [idx for idx, _ in sorted(scores, key=lambda x: x[1])[:m]]
+        selected_parameters = [client_parameters[idx] for idx in selected]
+        return self.aggregate_parameters(selected_parameters)
+
     def run_round(self, round_idx):
         """Executes a single federated learning round."""
         print(f"\n--- Starting Federated Round {round_idx} ---")
@@ -153,8 +181,8 @@ class SimulatedFederation:
             print(f"Hospital Node {i+1} training -> Local Loss: {metrics['loss']:.4f}, Accuracy: {metrics['accuracy']:.4f}")
             client_updates.append(new_params)
             
-        # Global Server aggregation (FedAvg)
-        aggregated_params = self.aggregate_parameters(client_updates)
+        # Global Server aggregation with Byzantine-robust Multi-Krum
+        aggregated_params = self.robust_aggregate(client_updates, f=min(1, max(1, len(client_updates) // 4)))
         
         # Update the central server model with new weights
         params_dict = zip(self.central_model.state_dict().keys(), aggregated_params)

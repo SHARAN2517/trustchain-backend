@@ -57,9 +57,96 @@ class TrustChainPrivacyEngine:
             return float('inf')
         
         q = batch_size / dataset_size  # Sampling ratio
-        steps_scale = math.sqrt(steps)
-        epsilon = 2.0 * q * steps_scale / noise_multiplier
+        epsilon, _ = self._get_privacy_spent_rdp(q, noise_multiplier, steps, self.target_delta)
         return epsilon
+
+    def _get_privacy_spent_rdp(self, q, noise_multiplier, steps, delta, orders=None):
+        """Estimate epsilon using the RDP accountant for Gaussian mechanism."""
+        if orders is None:
+            orders = [1.25, 2, 4, 8, 16, 32, 64, 128]
+        if noise_multiplier <= 0:
+            return float('inf'), None
+
+        rdp = []
+        for order in orders:
+            if q == 0 or noise_multiplier == 0:
+                rdp.append(float('inf'))
+            else:
+                rdp_val = steps * q**2 * order / (2.0 * noise_multiplier**2)
+                rdp.append(rdp_val)
+
+        epsilons = [rdp_i + math.log(1.0 / delta) / (order - 1.0)
+                    for order, rdp_i in zip(orders, rdp)]
+        best_idx = int(min(range(len(epsilons)), key=lambda i: epsilons[i]))
+        return epsilons[best_idx], orders[best_idx]
+
+    def get_rdp_summary(self, steps, batch_size, dataset_size, noise_multiplier, delta=None):
+        """Returns a detailed RDP accounting summary for monitoring."""
+        if delta is None:
+            delta = self.target_delta
+        q = batch_size / dataset_size
+        epsilon, order = self._get_privacy_spent_rdp(q, noise_multiplier, steps, delta)
+        return {
+            "epsilon": float(epsilon),
+            "delta": float(delta),
+            "optimal_order": float(order),
+            "sampling_ratio": float(q),
+            "noise_multiplier": float(noise_multiplier),
+            "steps": int(steps),
+        }
+
+
+class ElasticWeightConsolidation:
+    """Implements Elastic Weight Consolidation to reduce catastrophic forgetting."""
+    def __init__(self, model, dataloader, device=None):
+        self.model = model
+        self.dataloader = dataloader
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
+        self.fisher = None
+        self.params = {name: param.clone().detach() for name, param in self.model.named_parameters() if param.requires_grad}
+
+    def compute_fisher(self, num_samples=100):
+        self.model.train()
+        fisher = {name: torch.zeros_like(param) for name, param in self.model.named_parameters() if param.requires_grad}
+        total_samples = 0
+
+        for batch in self.dataloader:
+            if total_samples >= num_samples:
+                break
+            self.model.zero_grad()
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                inputs, targets = batch[0], batch[1]
+                outputs = self.model(inputs.to(self.device), targets.to(self.device))
+            else:
+                inputs = batch[0] if isinstance(batch, (list, tuple)) else batch
+                outputs = self.model(inputs.to(self.device))
+
+            if isinstance(outputs, dict) and 'logits' in outputs:
+                loss = torch.sum(outputs['logits']**2)
+            else:
+                loss = torch.sum(outputs**2)
+            loss.backward()
+
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and name in fisher:
+                    fisher[name] += param.grad.detach()**2
+            total_samples += 1
+
+        for name in fisher:
+            fisher[name] /= max(total_samples, 1)
+        self.fisher = fisher
+        return fisher
+
+    def penalty(self, model, lambda_factor=1.0):
+        if self.fisher is None:
+            raise ValueError('Fisher information has not been computed yet.')
+
+        loss = 0.0
+        for name, param in model.named_parameters():
+            if name in self.fisher:
+                loss += torch.sum(self.fisher[name] * (param - self.params[name])**2)
+        return lambda_factor * loss
 
 class SimulatedDPOptimizer:
     """

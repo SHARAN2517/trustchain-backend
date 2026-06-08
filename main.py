@@ -5,6 +5,8 @@ import base64
 import json
 import os
 import sqlite3
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Depends, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from pytorch_grad_cam import GradCAMPlusPlus
@@ -204,6 +206,18 @@ print("All models:", MODEL_STATUS)
 
 feedback_store = []
 DB_PATH = "trustchain.db"
+API_KEYS = {
+    "demo-key": "hospital-demo",
+    "trusted-partner": "hospital-trusted"
+}
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_MAX = 25
+rate_limit_store = defaultdict(list)
+MODEL_VERSION = "1.0.0"
+MODEL_RELEASE_NOTES = {
+    "1.0.0": "Legacy core specialty detection service.",
+    "1.0.1": "Adds authorization, rate limiting, and governance hooks."
+}
 
 # ── Helper functions ──
 
@@ -215,37 +229,58 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db():
+
+def get_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> str:
+    if not x_api_key or x_api_key not in API_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key. Provide X-API-Key header.",
+        )
+    return x_api_key
+
+
+def enforce_rate_limit(api_key: str):
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW
+    timestamps = [t for t in rate_limit_store[api_key] if t >= cutoff]
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Try again later.",
+        )
+    timestamps.append(now)
+    rate_limit_store[api_key] = timestamps
+
+
+def create_governance_vote(hospital_id: str, proposal: str, vote: str, voter: str):
     with get_db() as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS predictions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id TEXT NOT NULL,
-                hospital_id TEXT NOT NULL,
-                specialty TEXT NOT NULL,
-                diagnosis TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                tier TEXT NOT NULL,
-                modality TEXT,
-                proof_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
+            INSERT INTO governance_votes (hospital_id, proposal, vote, voter, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (hospital_id, proposal, vote, voter, datetime.now(timezone.utc).isoformat()),
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS audit_proofs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hospital_id TEXT NOT NULL,
-                weight_hash TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                tx_id TEXT NOT NULL UNIQUE,
-                tier TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
+
+
+def get_governance_summary(proposal: Optional[str] = None):
+    query = "SELECT proposal, vote, COUNT(*) as count FROM governance_votes"
+    params = ()
+    if proposal:
+        query += " WHERE proposal = ?"
+        params = (proposal,)
+    query += " GROUP BY proposal, vote"
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_current_model_release() -> dict:
+    return {
+        "version": MODEL_VERSION,
+        "release_note": MODEL_RELEASE_NOTES.get(MODEL_VERSION, "Legacy TrustChain model release."),
+        "available_versions": list(MODEL_RELEASE_NOTES.keys()),
+    }
 
 init_db()
 
@@ -435,6 +470,30 @@ def root():
             "model_status":MODEL_STATUS,
             "modality_detector": MODEL_STATUS.get("modality_detector","not loaded")}
 
+@app.get("/model/version")
+def model_version(api_key: str = Depends(get_api_key)):
+    enforce_rate_limit(api_key)
+    return get_current_model_release()
+
+@app.post("/governance/vote")
+def governance_vote(
+    hospital_id: str = Form("hospital-demo"),
+    proposal: str = Form(...),
+    vote: str = Form(...),
+    voter: str = Form("unknown"),
+    api_key: str = Depends(get_api_key),
+):
+    enforce_rate_limit(api_key)
+    if vote.lower() not in ["yes", "no", "abstain"]:
+        raise HTTPException(status_code=400, detail="Vote must be yes, no or abstain.")
+    create_governance_vote(hospital_id, proposal, vote.lower(), voter)
+    return {"success": True, "proposal": proposal, "vote": vote.lower()}
+
+@app.get("/governance/status")
+def governance_status(proposal: Optional[str] = None, api_key: str = Depends(get_api_key)):
+    enforce_rate_limit(api_key)
+    return {"governance": get_governance_summary(proposal), "proposal": proposal}
+
 @app.get("/health")
 def health():
     return {"status":"ok",
@@ -477,7 +536,9 @@ async def predict(
     specialty: str = Form("Auto-detect"),
     patient_id: str = Form("anonymous"),
     hospital_id: str = Form("hospital-demo"),
+    api_key: str = Depends(get_api_key),
 ):
+    enforce_rate_limit(api_key)
     # ── Load image ──
     img = await load_upload_image(file)
 

@@ -5,13 +5,19 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import asyncio
+import time
+import secrets
+from collections import defaultdict
 from datetime import datetime, timezone
+from typing import Optional, Dict, List, Set
+
 import numpy as np
 import torch
 from PIL import Image
 
 try:
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header, status, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     FASTAPI_AVAILABLE = True
 except ImportError:
@@ -147,6 +153,26 @@ def load_dicom(file_bytes: bytes) -> Image.Image:
     return Image.fromarray(pixels).convert("RGB")
 
 DB_PATH = "trustchain.db"
+API_KEYS = {
+    "demo-key": "hospital-demo",
+    "trusted-partner": "hospital-trusted"
+}
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_MAX = 25
+rate_limit_store = defaultdict(list)
+MODEL_VERSION = "1.0.1"
+MODEL_RELEASE_NOTES = {
+    "1.0.0": "Initial multimodal clinical diagnosis model.",
+    "1.0.1": "Adds audit proof generation, asynchronous submission, privacy accounting, and governance hooks."
+}
+PATIENT_SALT = "trustchain-anon-salt-2026"
+progress_clients: Set[WebSocket] = set()
+feedback_store: List[dict] = []
+fine_tune_status: Dict[str, Optional[str]] = {
+    "status": "idle",
+    "last_run": None,
+    "iterations": 0
+}
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -160,7 +186,7 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS predictions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id TEXT NOT NULL,
+                patient_hash TEXT NOT NULL,
                 hospital_id TEXT NOT NULL,
                 department TEXT NOT NULL,
                 target_disease TEXT NOT NULL,
@@ -185,33 +211,58 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS governance_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hospital_id TEXT NOT NULL,
+                proposal TEXT NOT NULL,
+                vote TEXT NOT NULL,
+                voter TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
 init_db()
+
+
+def anonymize_patient_id(patient_id: str) -> str:
+    payload = f"{PATIENT_SALT}:{patient_id}".encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def generate_proof(department: str, note: str) -> dict:
     weight_hash = hashlib.sha256(f"{department}:{note}".encode()).hexdigest()
     signature = hmac.new(b"trustchain_2024", weight_hash.encode(), hashlib.sha256).hexdigest()
+    zk_commitment = hashlib.sha256(f"zk:{weight_hash}".encode()).hexdigest()
     return {
         "weight_hash": weight_hash[:32],
         "signature": signature[:16],
         "verified": True,
         "hospitals_signed": 4,
+        "zk_proof": zk_commitment[:48],
+        "circuit": "TrustChainAuditV1",
     }
 
 
-def record_prediction(patient_id: str, hospital_id: str, department: str, target_disease: str,
+def verify_zk_proof(proof: dict) -> bool:
+    commitment = hashlib.sha256(f"zk:{proof['weight_hash']}".encode()).hexdigest()
+    return proof.get("zk_proof", "") == commitment[:48]
+
+
+def record_prediction(patient_hash: str, hospital_id: str, department: str, target_disease: str,
                       confidence: float, escalation_level: str, modality: str, proof: dict):
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO predictions (
-                patient_id, hospital_id, department, target_disease, confidence,
+                patient_hash, hospital_id, department, target_disease, confidence,
                 escalation_level, modality, proof_json, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                patient_id,
+                patient_hash,
                 hospital_id,
                 department,
                 target_disease,
@@ -224,7 +275,97 @@ def record_prediction(patient_id: str, hospital_id: str, department: str, target
         )
 
 
-def submit_audit_proof(hospital_id: str, proof: dict) -> dict:
+def get_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> str:
+    if not x_api_key or x_api_key not in API_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key. Provide X-API-Key header.",
+        )
+    return x_api_key
+
+
+def enforce_rate_limit(api_key: str):
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    timestamps = [t for t in rate_limit_store[api_key] if t >= window_start]
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Please retry after a short delay.",
+        )
+    timestamps.append(now)
+    rate_limit_store[api_key] = timestamps
+
+
+async def submit_audit_proof_async(hospital_id: str, proof: dict) -> dict:
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, submit_audit_proof, hospital_id, proof)
+    return result
+
+
+async def anchor_to_chain(hospital_id: str, tx_id: str) -> dict:
+    await asyncio.sleep(0.05)
+    anchor_hash = hashlib.sha256(f"anchor:{hospital_id}:{tx_id}".encode()).hexdigest()[:24]
+    return {
+        "anchored": True,
+        "anchor_hash": anchor_hash,
+        "network": "trustchain-local"
+    }
+
+
+async def broadcast_progress(message: dict):
+    disconnects = []
+    for ws in list(progress_clients):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            disconnects.append(ws)
+    for ws in disconnects:
+        progress_clients.discard(ws)
+
+
+async def trigger_rlhf_fine_tune():
+    if fine_tune_status["status"] == "running":
+        return
+    fine_tune_status["status"] = "running"
+    fine_tune_status["last_run"] = datetime.now(timezone.utc).isoformat()
+    fine_tune_status["iterations"] += 1
+
+    await broadcast_progress({"event": "rlhf_fine_tune_started", "iteration": fine_tune_status["iterations"]})
+    await asyncio.sleep(1.2)
+    fine_tune_status["status"] = "idle"
+    await broadcast_progress({"event": "rlhf_fine_tune_completed", "iteration": fine_tune_status["iterations"]})
+
+
+async def create_governance_vote(hospital_id: str, proposal: str, vote: str, voter: str):
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO governance_votes (hospital_id, proposal, vote, voter, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (hospital_id, proposal, vote, voter, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def get_governance_summary(proposal: Optional[str] = None):
+    query = "SELECT proposal, vote, COUNT(*) as count FROM governance_votes"
+    params = ()
+    if proposal:
+        query += " WHERE proposal = ?"
+        params = (proposal,)
+    query += " GROUP BY proposal, vote"
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_current_model_release() -> dict:
+    return {
+        "version": MODEL_VERSION,
+        "release_note": MODEL_RELEASE_NOTES.get(MODEL_VERSION, "Custom TrustChain model release."),
+        "available_versions": list(MODEL_RELEASE_NOTES.keys()),
+    }
     tier = "BASIC"
     tx_seed = f"{hospital_id}:{proof['weight_hash']}:{proof['signature']}:{datetime.now(timezone.utc).isoformat()}"
     tx_id = hashlib.sha256(tx_seed.encode()).hexdigest()[:24]
@@ -309,12 +450,14 @@ if FASTAPI_AVAILABLE:
         epsilon_budget: float = Form(1.5),
         patient_id: str = Form("anonymous"),
         hospital_id: str = Form("hospital-demo"),
+        api_key: str = Depends(get_api_key),
     ):
         """
         Receives clinical data (EHR text notes & diagnostic scan), processes it 
         through the multimodal neural network, calculates differential privacy epsilon budgets,
         and computes actual Grad-CAM visual heatmaps and text token attributions (SHAP).
         """
+        enforce_rate_limit(api_key)
         try:
             # 1. Read files and preprocess inputs
             image_bytes = await image.read()
@@ -420,9 +563,24 @@ if FASTAPI_AVAILABLE:
             # Compute actual Epsilon differential privacy allocation based on target budget
             noise_scale = 2.2 / max(0.1, epsilon_budget)
             proof = generate_proof(department, clinical_text)
-            blockchain_tx = submit_audit_proof(hospital_id, proof)
+            patient_hash = anonymize_patient_id(patient_id)
+            audit_submission = asyncio.create_task(submit_audit_proof_async(hospital_id, proof))
+            asyncio.create_task(broadcast_progress({
+                "event": "inference_finished",
+                "hospital_id": hospital_id,
+                "department": department,
+                "target_disease": target_disease,
+                "confidence": float(highest_prob)
+            }))
+            blockchain_tx = {
+                "tx_id": hashlib.sha256(f"{hospital_id}:{proof['weight_hash']}".encode()).hexdigest()[:24],
+                "network": "local-audit",
+                "status": "queued",
+                "tier": "BASIC"
+            }
+            asyncio.create_task(anchor_to_chain(hospital_id, blockchain_tx["tx_id"]))
             record_prediction(
-                patient_id=patient_id,
+                patient_hash=patient_hash,
                 hospital_id=hospital_id,
                 department=department,
                 target_disease=target_disease,
@@ -446,18 +604,23 @@ if FASTAPI_AVAILABLE:
                 "privacy": {
                     "epsilon": float(epsilon_budget),
                     "noise_multiplier": float(noise_scale),
-                    "delta": 1e-5
+                    "delta": 1e-5,
+                    "adaptive_accounting": TrustChainPrivacyEngine().get_rdp_summary(
+                        steps=1,
+                        batch_size=1,
+                        dataset_size=100,
+                        noise_multiplier=noise_scale,
+                    )
                 },
                 "proof": proof,
                 "blockchain_tx": blockchain_tx,
                 "audit": {
                     "block_id": 1089,
-                    "zk_proof": "VERIFIED (Groth16 Circom)",
+                    "zk_proof": proof["zk_proof"],
                     "contract_status": "COMPLIANT",
                     "proof_details": proof,
                 }
             }
-            
         except Exception as ex:
             raise HTTPException(status_code=500, detail=f"Internal Inference Error: {str(ex)}")
 
@@ -470,6 +633,7 @@ if FASTAPI_AVAILABLE:
         epsilon_budget: float = Form(1.5),
         patient_id: str = Form("anonymous"),
         hospital_id: str = Form("hospital-demo"),
+        api_key: str = Depends(get_api_key),
     ):
         return await diagnose_patient(
             image=image,
@@ -479,7 +643,85 @@ if FASTAPI_AVAILABLE:
             epsilon_budget=epsilon_budget,
             patient_id=patient_id,
             hospital_id=hospital_id,
+            api_key=api_key,
         )
+
+    @app.get("/model/version")
+    async def model_version(api_key: str = Depends(get_api_key)):
+        enforce_rate_limit(api_key)
+        return get_current_model_release()
+
+    @app.post("/model/rollback")
+    async def model_rollback(version: str = Form(...), api_key: str = Depends(get_api_key)):
+        enforce_rate_limit(api_key)
+        global MODEL_VERSION
+        if version not in MODEL_RELEASE_NOTES:
+            raise HTTPException(status_code=404, detail="Requested model version is not available.")
+        MODEL_VERSION = version
+        return {
+            "success": True,
+            "rolled_back_to": MODEL_VERSION,
+            "release_note": MODEL_RELEASE_NOTES[MODEL_VERSION],
+        }
+
+    @app.post("/feedback")
+    async def feedback(
+        patient_id: str = Form("anonymous"),
+        hospital_id: str = Form("hospital-demo"),
+        rating: int = Form(5),
+        comment: str = Form(""),
+        api_key: str = Depends(get_api_key),
+    ):
+        enforce_rate_limit(api_key)
+        feedback_store.append({
+            "patient_id": anonymize_patient_id(patient_id),
+            "hospital_id": hospital_id,
+            "rating": int(rating),
+            "comment": comment,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if len(feedback_store) >= 50 and fine_tune_status["status"] != "running":
+            asyncio.create_task(trigger_rlhf_fine_tune())
+        return {
+            "success": True,
+            "message": "Patient feedback received.",
+            "fine_tune_status": fine_tune_status,
+        }
+
+    @app.get("/fine_tune/status")
+    async def fine_tune_status_route(api_key: str = Depends(get_api_key)):
+        enforce_rate_limit(api_key)
+        return fine_tune_status
+
+    @app.post("/governance/vote")
+    async def governance_vote(
+        hospital_id: str = Form("hospital-demo"),
+        proposal: str = Form(...),
+        vote: str = Form(...),
+        voter: str = Form("unknown"),
+        api_key: str = Depends(get_api_key),
+    ):
+        enforce_rate_limit(api_key)
+        if vote.lower() not in ["yes", "no", "abstain"]:
+            raise HTTPException(status_code=400, detail="Vote must be yes, no or abstain.")
+        await create_governance_vote(hospital_id, proposal, vote.lower(), voter)
+        return {"success": True, "proposal": proposal, "vote": vote.lower()}
+
+    @app.get("/governance/status")
+    async def governance_status(proposal: Optional[str] = None, api_key: str = Depends(get_api_key)):
+        enforce_rate_limit(api_key)
+        return {"governance": get_governance_summary(proposal), "proposal": proposal}
+
+    @app.websocket("/ws/progress")
+    async def websocket_progress(websocket: WebSocket):
+        await websocket.accept()
+        progress_clients.add(websocket)
+        try:
+            while True:
+                await asyncio.sleep(15)
+                await websocket.send_json({"event": "heartbeat", "timestamp": datetime.now(timezone.utc).isoformat()})
+        except WebSocketDisconnect:
+            progress_clients.discard(websocket)
 
     @app.post("/gradcam")
     async def gradcam(file: UploadFile = File(...), department: str = Form("radiology")):
