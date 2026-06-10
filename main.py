@@ -252,6 +252,51 @@ def enforce_rate_limit(api_key: str):
     rate_limit_store[api_key] = timestamps
 
 
+def init_db():
+    with get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id TEXT NOT NULL,
+                hospital_id TEXT NOT NULL,
+                specialty TEXT NOT NULL,
+                diagnosis TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                tier TEXT NOT NULL,
+                modality TEXT,
+                proof_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_proofs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hospital_id TEXT NOT NULL,
+                weight_hash TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                tx_id TEXT NOT NULL UNIQUE,
+                tier TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS governance_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hospital_id TEXT NOT NULL,
+                proposal TEXT NOT NULL,
+                vote TEXT NOT NULL,
+                voter TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+
 def create_governance_vote(hospital_id: str, proposal: str, vote: str, voter: str):
     with get_db() as conn:
         conn.execute(
