@@ -76,6 +76,50 @@ backend/
     uvicorn app:app --host 127.0.0.1 --port 8000 --reload
     ```
 
+    `app.py` requires trained weights at `models/trustchain_med_model.pth`.
+    For local API wiring only, set `TRUSTCHAIN_ALLOW_RANDOM_WEIGHTS=1`; do not
+    use that mode for demos, validation, or clinical inference.
+
+---
+
+## Training
+
+`train.py` trains only from a real CSV manifest by default. The manifest must
+contain `image_path` and `note` columns plus either:
+
+*   one JSON column named `labels`, for example `[0, 1, 0, 0, 0, 0, 0, 0]`
+*   or one binary column per class name supplied through `--labels`
+
+Optional metadata columns `age`, `sex`, and `study_description` are consumed by
+the metadata fusion gate during training.
+
+Example:
+
+```bash
+python train.py ^
+  --manifest data/train_manifest.csv ^
+  --image-root data/images ^
+  --epochs 20 ^
+  --min-samples 1000 ^
+  --save-model
+```
+
+The trained state dict is saved to `models/trustchain_med_model.pth`.
+
+Differential privacy is opt-in and guarded against tiny datasets:
+
+```bash
+python train.py --manifest data/train_manifest.csv --image-root data/images --dp --min-dp-samples 5000 --save-model
+```
+
+For a non-deployable plumbing check:
+
+```bash
+python train.py --smoke-test
+```
+
+Smoke-test mode uses random tensors and refuses to save model weights.
+
 ---
 
 ## 📡 API Overview
@@ -103,6 +147,15 @@ Example keys:
     *   `target_disease`
     *   `epsilon_budget`
     *   `patient_id`
+    *   `patient_age` - optional metadata, for example `045Y`
+    *   `patient_sex` - optional metadata, for example `M` or `F`
+    *   `study_description` - optional study metadata
+    *   `mc_samples` - Monte Carlo dropout samples for uncertainty, default `20`
+    *   `uncertainty_threshold` - manual-review trigger threshold, default `0.12`
+
+Inference responses include `uncertainty.manual_review_required` and
+`proof.proof_id`. The proof links the model version, model weights, input hash,
+metadata hash, and output hash for audit verification.
 
 ### Grad-CAM Heatmap
 
@@ -128,6 +181,27 @@ Example keys:
 *   Optional query:
     *   `hospital_id`
     *   `limit`
+
+### Inference Proof Lookup
+
+*   `GET /audit/inference/{proof_id}`
+*   `Headers`: `X-API-Key`
+*   Returns the stored proof of inference and verifies its commitment.
+
+### HITL Clinician Review
+
+*   `POST /hitl/review`
+*   `Headers`: `X-API-Key`
+*   `application/x-www-form-urlencoded`
+*   Required fields:
+    *   `proof_id`
+    *   `action` - `verify` or `overrule`
+    *   `clinician_id`
+*   Optional fields:
+    *   `original_diagnosis`
+    *   `corrected_diagnosis` - required for `overrule`
+    *   `corrected_department`
+    *   `notes`
 
 ### Reputation
 
@@ -164,4 +238,4 @@ Example keys:
 
 *   `app.py` is the primary local API server entrypoint.
 *   `main.py` is an alternate FastAPI deployment script and includes additional specialty routing features.
-*   If `trustchain_med_model.pth` is missing, the backend still runs with randomized weights for development.
+*   Benchmark endpoints report `not_evaluated` until real held-out predictions are passed through `evaluator.compute_multilabel_metrics()`.

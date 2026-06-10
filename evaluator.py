@@ -1,6 +1,54 @@
 import numpy as np
 import scipy.stats as stats
 
+
+def compute_multilabel_metrics(y_true, y_prob, threshold=0.5):
+    """
+    Computes metrics from real held-out labels and model probabilities.
+    y_true and y_prob must both be shaped [n_samples, n_classes].
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    if y_true.shape != y_prob.shape:
+        raise ValueError("y_true and y_prob must have the same shape.")
+    if y_true.ndim != 2:
+        raise ValueError("Expected multilabel arrays shaped [n_samples, n_classes].")
+
+    y_pred = (y_prob >= threshold).astype(int)
+    aucs = []
+    f1s = []
+    sensitivities = []
+    specificities = []
+
+    for class_idx in range(y_true.shape[1]):
+        truth = y_true[:, class_idx]
+        prob = y_prob[:, class_idx]
+        pred = y_pred[:, class_idx]
+        aucs.append(compute_roc_auc(truth, prob))
+
+        tp = np.sum((truth == 1) & (pred == 1))
+        fp = np.sum((truth == 0) & (pred == 1))
+        fn = np.sum((truth == 1) & (pred == 0))
+        tn = np.sum((truth == 0) & (pred == 0))
+
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        f1s.append(2 * precision * recall / max(precision + recall, 1e-12))
+        sensitivities.append(recall)
+        specificities.append(tn / max(tn + fp, 1))
+
+    ece, bin_accs, bin_confs, bin_sizes = compute_ece(y_true.ravel(), y_prob.ravel())
+    return {
+        "auc_macro": float(np.mean(aucs)),
+        "f1_macro": float(np.mean(f1s)),
+        "sensitivity_macro": float(np.mean(sensitivities)),
+        "specificity_macro": float(np.mean(specificities)),
+        "ece": float(ece),
+        "ece_bin_accs": bin_accs,
+        "ece_bin_confs": bin_confs,
+        "ece_bin_sizes": bin_sizes,
+    }
+
 def compute_ece(y_true, y_prob, n_bins=10):
     """
     Computes the Expected Calibration Error (ECE).
@@ -177,78 +225,20 @@ def compute_faithfulness_auc(y_prob_original, cam_values, target_function, steps
     - Deletion: Starts with original image and removes pixel groups.
       Highly faithful maps exhibit rapid confidence drops (Low Deletion AUC).
     """
-    # Simulated faithfulness curves based on actual benchmarks
-    insertion_x = np.linspace(0, 100, steps)
-    deletion_x = np.linspace(0, 100, steps)
-    
-    # High-fidelity curve simulations
-    insertion_y = y_prob_original * (0.15 + 0.85 * (1.0 - np.exp(-0.06 * insertion_x)))
-    deletion_y = y_prob_original * np.exp(-0.05 * deletion_x)
-    
-    insertion_auc = trapezoid_area(insertion_y, insertion_x) / (100.0 * y_prob_original)
-    deletion_auc = trapezoid_area(deletion_y, deletion_x) / (100.0 * y_prob_original)
-    
-    return {
-        "insertion_x": [float(val) for val in insertion_x],
-        "insertion_y": [float(val) for val in insertion_y],
-        "deletion_x": [float(val) for val in deletion_x],
-        "deletion_y": [float(val) for val in deletion_y],
-        "insertion_auc": float(insertion_auc),
-        "deletion_auc": float(deletion_auc)
-    }
+    if cam_values is None or target_function is None:
+        raise ValueError("Real CAM values and a target_function are required for faithfulness metrics.")
+
+    # Placeholder implementation until a real perturbation pipeline is connected.
+    # This guards against reporting simulated faithfulness as evaluated performance.
+    raise NotImplementedError("Faithfulness AUC requires image perturbation inference over a held-out set.")
 
 
 def generate_ablation_benchmarks():
     """
-    Compiles rigorous ablation and comparison tables on standard clinical public datasets:
-    MIMIC-CXR (Radiology), PTB-XL (Cardiology), PCam (Oncology), and CheXpert (Pediatrics).
+    Historical placeholder removed.
+    Use compute_multilabel_metrics(y_true, y_pred_proba) on a held-out split instead.
     """
-    return {
-        "MIMIC-CXR": {
-            "dataset": "MIMIC-CXR v2.0",
-            "modality": "Chest X-Ray + EHR Note",
-            "samples": 84200,
-            "metrics": {
-                "multimodal": {"auc": 0.892, "f1": 0.824, "sensitivity": 0.841, "specificity": 0.895, "ece": 0.024},
-                "image_only": {"auc": 0.821, "f1": 0.752, "sensitivity": 0.763, "specificity": 0.838, "ece": 0.051},
-                "text_only":  {"auc": 0.798, "f1": 0.715, "sensitivity": 0.704, "specificity": 0.812, "ece": 0.073}
-            },
-            "literature_baseline": {"study": "Huang et al. (2020) ConVIRT", "auc": 0.873}
-        },
-        "PTB-XL": {
-            "dataset": "PTB-XL ECG",
-            "modality": "12-Lead ECG + EHR Note",
-            "samples": 21837,
-            "metrics": {
-                "multimodal": {"auc": 0.934, "f1": 0.865, "sensitivity": 0.884, "specificity": 0.941, "ece": 0.015},
-                "image_only": {"auc": 0.871, "f1": 0.794, "sensitivity": 0.812, "specificity": 0.887, "ece": 0.038},
-                "text_only":  {"auc": 0.845, "f1": 0.761, "sensitivity": 0.781, "specificity": 0.852, "ece": 0.062}
-            },
-            "literature_baseline": {"study": "Strodthoff et al. (2021) DeepECG", "auc": 0.911}
-        },
-        "PCam": {
-            "dataset": "PatchCamelyon (PCam)",
-            "modality": "H&E Tissue Biopsy Slide + Pathology Note",
-            "samples": 32768,
-            "metrics": {
-                "multimodal": {"auc": 0.961, "f1": 0.908, "sensitivity": 0.923, "specificity": 0.968, "ece": 0.009},
-                "image_only": {"auc": 0.905, "f1": 0.837, "sensitivity": 0.849, "specificity": 0.915, "ece": 0.027},
-                "text_only":  {"auc": 0.872, "f1": 0.792, "sensitivity": 0.801, "specificity": 0.883, "ece": 0.049}
-            },
-            "literature_baseline": {"study": "Veeling et al. (2018) PCam CNN", "auc": 0.942}
-        },
-        "CheXpert": {
-            "dataset": "CheXpert",
-            "modality": "Pediatric X-Ray + Pediatric EHR Note",
-            "samples": 12450,
-            "metrics": {
-                "multimodal": {"auc": 0.879, "f1": 0.801, "sensitivity": 0.817, "specificity": 0.889, "ece": 0.031},
-                "image_only": {"auc": 0.812, "f1": 0.729, "sensitivity": 0.741, "specificity": 0.825, "ece": 0.064},
-                "text_only":  {"auc": 0.782, "f1": 0.695, "sensitivity": 0.688, "specificity": 0.804, "ece": 0.088}
-            },
-            "literature_baseline": {"study": "Irvin et al. (2019) CheXpert DenseNet", "auc": 0.860}
-        }
-    }
+    raise NotImplementedError("Ablation benchmarks require predictions from real held-out datasets.")
 
 
 def compute_privacy_tradeoff_curves():
@@ -256,28 +246,7 @@ def compute_privacy_tradeoff_curves():
     Computes accuracy vs epsilon (privacy-utility tradeoff) and Membership Inference Attack
     (MIA) success rates under DP-SGD (Differential Privacy).
     """
-    epsilons = [0.1, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 100.0]
-    
-    # Model utility (accuracy) decays as epsilon shrinks (more noise)
-    accuracy_dp = [0.55, 0.72, 0.81, 0.88, 0.91, 0.93, 0.935, 0.938, 0.94]
-    
-    # MIA Success rate decays back to random guess (0.50) under strong DP protection (low epsilon)
-    # Without DP (high epsilon / inf), attack success rate can exceed 80% due to gradient memorization.
-    mia_success_dp = [0.502, 0.511, 0.528, 0.551, 0.592, 0.648, 0.715, 0.772, 0.815]
-    
-    # Unprotected baseline
-    baseline_acc = 0.94
-    baseline_mia = 0.83
-    
-    return {
-        "epsilons": epsilons,
-        "accuracy_dp": accuracy_dp,
-        "mia_success_dp": mia_success_dp,
-        "baseline": {
-            "accuracy": baseline_acc,
-            "mia_success": baseline_mia
-        }
-    }
+    raise NotImplementedError("Privacy-utility curves require repeated training runs on real data.")
 
 
 def compute_federated_convergence():
@@ -288,25 +257,7 @@ def compute_federated_convergence():
     - Centralized training baseline (upper bound).
     - Impact of client dropouts (30% dropouts) and stragglers.
     """
-    rounds = list(range(1, 51))
-    
-    # Convergences curves (val accuracy)
-    centralized = [0.5 + 0.44 * (1.0 - np.exp(-0.15 * r)) for r in rounds]
-    fedavg_iid = [0.5 + 0.41 * (1.0 - np.exp(-0.10 * r)) for r in rounds]
-    fedavg_non_iid = [0.45 + 0.38 * (1.0 - np.exp(-0.06 * r)) for r in rounds]
-    
-    # Simulating stragglers and dropouts (slower/noisy convergence)
-    fedavg_non_iid_dropout = [
-        val - (0.04 * np.sin(r * 0.8) * np.exp(-r/20.0)) for r, val in zip(rounds, fedavg_non_iid)
-    ]
-    
-    return {
-        "rounds": rounds,
-        "centralized": [float(val) for val in centralized],
-        "fedavg_iid": [float(val) for val in fedavg_iid],
-        "fedavg_non_iid": [float(val) for val in fedavg_non_iid],
-        "fedavg_non_iid_dropout": [float(val) for val in fedavg_non_iid_dropout]
-    }
+    raise NotImplementedError("Federated convergence curves require logged validation metrics from real rounds.")
 
 
 if __name__ == "__main__":
@@ -325,8 +276,7 @@ if __name__ == "__main__":
     ece, _, _, _ = compute_ece(labels, pred_a)
     print(f"Expected Calibration Error (ECE): {ece:.6f}")
     
-    # Test Grad-CAM insertion/deletion
-    cam = compute_faithfulness_auc(0.85, None, None)
-    print(f"Grad-CAM Faithfulness Insertion AUC: {cam['insertion_auc']:.4f}, Deletion AUC: {cam['deletion_auc']:.4f}")
+    metrics = compute_multilabel_metrics(labels.reshape(-1, 1), pred_a.reshape(-1, 1))
+    print(f"Real-input metric helper AUC: {metrics['auc_macro']:.4f}, F1: {metrics['f1_macro']:.4f}")
     
     print("Evaluator operations successfully validated!")

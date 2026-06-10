@@ -91,7 +91,7 @@ class ClinicalBERTExtractor(nn.Module):
     Wraps emilyalsentzer/Bio_ClinicalBERT to extract dense contextual tokens from unstructured notes.
     Falls back gracefully to a smaller memory-friendly BERT transformer if offline or transformers is missing.
     """
-    def __init__(self, vocab_size=256, embed_dim=768, depth=12, num_heads=12):
+    def __init__(self, vocab_size=30522, embed_dim=768, depth=12, num_heads=12):
         super().__init__()
         self.embed_dim = embed_dim
         self.hf_active = False
@@ -203,6 +203,13 @@ class TrustChainMedModel(nn.Module):
         self.vit = VisionTransformerExtractor(embed_dim=embed_dim)
         self.clinical_bert = ClinicalBERTExtractor(embed_dim=embed_dim)
         self.fusion = CrossAttentionFusion(embed_dim=embed_dim)
+        self.metadata_gate = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, embed_dim * 2),
+            nn.Sigmoid(),
+        )
         
         # Classification Head (Multi-label prediction mapping GELU activations)
         self.classifier = nn.Sequential(
@@ -215,7 +222,7 @@ class TrustChainMedModel(nn.Module):
             nn.Linear(256, num_classes)
         )
         
-    def forward(self, images, clinical_text_ids):
+    def forward(self, images, clinical_text_ids, metadata_features=None):
         # 1. Feature extraction
         img_cls, img_patches = self.vit(images)
         txt_cls, txt_seq = self.clinical_bert(clinical_text_ids)
@@ -225,6 +232,10 @@ class TrustChainMedModel(nn.Module):
         
         # 3. Concatenate fused visual representation and context language vectors
         multimodal_rep = torch.cat((fused_img_context, txt_cls), dim=-1) # [B, 1536]
+        if metadata_features is not None:
+            metadata_features = metadata_features.to(multimodal_rep.device, dtype=multimodal_rep.dtype)
+            metadata_gate = self.metadata_gate(metadata_features)
+            multimodal_rep = multimodal_rep * (1.0 + 0.1 * metadata_gate)
         
         # 4. Score disease predictions
         logits = self.classifier(multimodal_rep)
@@ -244,8 +255,9 @@ if __name__ == '__main__':
     model = TrustChainMedModel()
     dummy_imgs = torch.randn(2, 3, 224, 224)
     dummy_txt = torch.randint(0, 30522, (2, 64))
+    dummy_metadata = torch.tensor([[0.45, 1.0, 0.25], [0.72, -1.0, 0.61]])
     
-    outputs = model(dummy_imgs, dummy_txt)
+    outputs = model(dummy_imgs, dummy_txt, dummy_metadata)
     print("  [SUCCESS] Output probabilities shape:", outputs['probabilities'].shape)
     print("  [SUCCESS] Cross-attention weights shape:", outputs['attention_weights'].shape)
     print("Verification completed cleanly.")

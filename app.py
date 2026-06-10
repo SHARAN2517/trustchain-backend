@@ -29,6 +29,11 @@ try:
 except ImportError:
     TORCHVISION_AVAILABLE = False
 
+try:
+    from transformers import AutoTokenizer
+except ImportError:
+    AutoTokenizer = None
+
 # Import local architecture modules
 from model import TrustChainMedModel
 from explainability import ViTGradCAM, ClinicalTextSHAP
@@ -57,7 +62,9 @@ else:
 # Model configurations
 NUM_CLASSES = 8
 EMBED_DIM = 768
-WEIGHTS_FILE = "trustchain_med_model.pth"
+WEIGHTS_FILE = os.path.join("models", "trustchain_med_model.pth")
+ALLOW_RANDOM_WEIGHTS = os.getenv("TRUSTCHAIN_ALLOW_RANDOM_WEIGHTS") == "1"
+UNCERTAINTY_THRESHOLD = 0.12
 
 # Load the trained multimodal model globally
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,18 +72,34 @@ model = TrustChainMedModel(num_classes=NUM_CLASSES, embed_dim=EMBED_DIM)
 
 if os.path.exists(WEIGHTS_FILE):
     try:
-        model.load_state_dict(torch.load(WEIGHTS_FILE, map_location=device))
-        print(f"[SUCCESS] Loaded Colab-trained model weights from: {WEIGHTS_FILE}")
+        load_result = model.load_state_dict(torch.load(WEIGHTS_FILE, map_location=device), strict=False)
+        if load_result.missing_keys:
+            print(f"[WARNING] Missing weights initialized randomly: {load_result.missing_keys}")
+        if load_result.unexpected_keys:
+            print(f"[WARNING] Ignored unexpected weights: {load_result.unexpected_keys}")
+        print(f"[SUCCESS] Loaded trained model weights from: {WEIGHTS_FILE}")
     except Exception as e:
-        print(f"[ERROR] Failed to load weights from {WEIGHTS_FILE}: {e}. Running with randomized model.")
+        raise RuntimeError(f"Failed to load weights from {WEIGHTS_FILE}: {e}") from e
+elif ALLOW_RANDOM_WEIGHTS:
+    print(f"[WARNING] {WEIGHTS_FILE} missing. Running with randomized weights because TRUSTCHAIN_ALLOW_RANDOM_WEIGHTS=1.")
 else:
-    print(f"[INFO] Weights file '{WEIGHTS_FILE}' not found in core folder. Running inference with randomized weights.")
+    raise RuntimeError(
+        f"Missing trained weights at {WEIGHTS_FILE}. Train with train.py --save-model, "
+        "or set TRUSTCHAIN_ALLOW_RANDOM_WEIGHTS=1 for local development only."
+    )
 
 model.to(device)
 model.eval()
 
-# Simple vocabulary mapping simulator for clinical text notes
-# (Simulates BERT WordPiece tokenizer vocabulary)
+clinical_tokenizer = None
+if AutoTokenizer is not None:
+    try:
+        clinical_tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+    except Exception as exc:
+        print(f"[WARNING] Could not load Bio_ClinicalBERT tokenizer: {exc}. Falling back to local vocabulary.")
+
+# Local fallback for development-only tokenization when the Bio ClinicalBERT tokenizer
+# is not installed or not cached.
 CLINICAL_VOCAB = {
     "[pad]": 0, "[unk]": 1, "[cls]": 2, "[sep]": 3, "patient": 4, "presents": 5, "with": 6, 
     "cardiomegaly": 10, "heart": 11, "enlarged": 12, "effusion": 13, "fluid": 14, "pleural": 15,
@@ -86,12 +109,22 @@ CLINICAL_VOCAB = {
     "normal": 50, "clear": 51, "healthy": 52
 }
 
-def tokenize_text(text: str, max_length: int = 32) -> tuple:
+def tokenize_text(text: str, max_length: int = 128) -> tuple:
     """
-    Tokenizes raw text into sequence of wordpiece vocabulary indices.
-    If huggingface transformers is installed, it could use ClinicalBERTTokenizer.
-    Here we implement a robust simulator mapping diagnostic tokens to IDs.
+    Tokenizes raw text with Bio ClinicalBERT when available.
+    Falls back to a small deterministic vocabulary only for development.
     """
+    if clinical_tokenizer is not None:
+        encoded = clinical_tokenizer(
+            text,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        token_words = clinical_tokenizer.convert_ids_to_tokens(encoded["input_ids"][0])
+        return encoded["input_ids"], token_words
+
     words = text.lower().replace(",", "").replace(".", "").split()
     input_ids = [CLINICAL_VOCAB["[cls]"]]
     token_words = ["[cls]"]
@@ -151,6 +184,64 @@ def load_dicom(file_bytes: bytes) -> Image.Image:
         pixels = np.zeros_like(pixels, dtype=np.uint8)
         
     return Image.fromarray(pixels).convert("RGB")
+
+
+def extract_dicom_metadata(file_bytes: bytes) -> dict:
+    try:
+        import pydicom
+    except ImportError:
+        return {}
+    try:
+        ds = pydicom.dcmread(io.BytesIO(file_bytes), stop_before_pixels=True)
+    except Exception:
+        return {}
+    return {
+        "age": str(getattr(ds, "PatientAge", "") or ""),
+        "sex": str(getattr(ds, "PatientSex", "") or ""),
+        "study_description": str(getattr(ds, "StudyDescription", "") or ""),
+    }
+
+
+def normalize_age(age_value) -> float:
+    text = str(age_value or "").strip().upper()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return 0.0
+    age = float(digits)
+    if text.endswith("M"):
+        age = age / 12.0
+    elif text.endswith("W"):
+        age = age / 52.0
+    elif text.endswith("D"):
+        age = age / 365.0
+    return max(0.0, min(age / 100.0, 1.2))
+
+
+def encode_sex(sex_value) -> float:
+    sex = str(sex_value or "").strip().lower()
+    if sex in {"m", "male"}:
+        return 1.0
+    if sex in {"f", "female"}:
+        return -1.0
+    return 0.0
+
+
+def encode_study_description(description: str) -> float:
+    if not description:
+        return 0.0
+    digest = hashlib.sha256(description.lower().encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) / 0xFFFFFFFF
+
+
+def metadata_to_tensor(metadata: dict) -> torch.Tensor:
+    return torch.tensor(
+        [[
+            normalize_age(metadata.get("age")),
+            encode_sex(metadata.get("sex")),
+            encode_study_description(metadata.get("study_description", "")),
+        ]],
+        dtype=torch.float32,
+    )
 
 DB_PATH = "trustchain.db"
 API_KEYS = {
@@ -223,6 +314,38 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inference_proofs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proof_id TEXT NOT NULL UNIQUE,
+                hospital_id TEXT NOT NULL,
+                patient_hash TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                metadata_hash TEXT NOT NULL,
+                proof_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clinician_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proof_id TEXT NOT NULL,
+                hospital_id TEXT NOT NULL,
+                clinician_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                original_diagnosis TEXT,
+                corrected_diagnosis TEXT,
+                corrected_department TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
 init_db()
 
@@ -232,23 +355,121 @@ def anonymize_patient_id(patient_id: str) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
-def generate_proof(department: str, note: str) -> dict:
-    weight_hash = hashlib.sha256(f"{department}:{note}".encode()).hexdigest()
-    signature = hmac.new(b"trustchain_2024", weight_hash.encode(), hashlib.sha256).hexdigest()
-    zk_commitment = hashlib.sha256(f"zk:{weight_hash}".encode()).hexdigest()
+def canonical_json(payload) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def model_weight_hash() -> str:
+    if not os.path.exists(WEIGHTS_FILE):
+        return "random-dev-weights"
+    digest = hashlib.sha256()
+    with open(WEIGHTS_FILE, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+MODEL_WEIGHT_HASH = model_weight_hash()
+
+
+def generate_proof(department: str, note: str, image_hash: str = "", output=None, metadata=None) -> dict:
+    output = output or {}
+    metadata = metadata or {}
+    input_payload = {
+        "department": department,
+        "image_hash": image_hash,
+        "clinical_text_hash": sha256_text(note),
+    }
+    input_hash = sha256_text(canonical_json(input_payload))
+    output_hash = sha256_text(canonical_json(output))
+    metadata_hash = sha256_text(canonical_json(metadata))
+    proof_seed = canonical_json({
+        "model_version": MODEL_VERSION,
+        "model_weight_hash": MODEL_WEIGHT_HASH,
+        "input_hash": input_hash,
+        "output_hash": output_hash,
+        "metadata_hash": metadata_hash,
+    })
+    proof_id = sha256_text(proof_seed)
+    signature = hmac.new(b"trustchain_2024", proof_id.encode(), hashlib.sha256).hexdigest()
+    zk_commitment = hashlib.sha256(f"zk:{proof_id}".encode()).hexdigest()
     return {
-        "weight_hash": weight_hash[:32],
+        "proof_id": proof_id,
+        "model_version": MODEL_VERSION,
+        "model_weight_hash": MODEL_WEIGHT_HASH,
+        "input_hash": input_hash,
+        "output_hash": output_hash,
+        "metadata_hash": metadata_hash,
+        "weight_hash": MODEL_WEIGHT_HASH[:32],
         "signature": signature[:16],
         "verified": True,
-        "hospitals_signed": 4,
+        "hospitals_signed": 1,
         "zk_proof": zk_commitment[:48],
-        "circuit": "TrustChainAuditV1",
+        "circuit": "TrustChainInferenceV1",
     }
 
 
 def verify_zk_proof(proof: dict) -> bool:
-    commitment = hashlib.sha256(f"zk:{proof['weight_hash']}".encode()).hexdigest()
+    commitment = hashlib.sha256(f"zk:{proof['proof_id']}".encode()).hexdigest()
     return proof.get("zk_proof", "") == commitment[:48]
+
+
+def record_inference_proof(hospital_id: str, patient_hash: str, proof: dict):
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO inference_proofs (
+                proof_id, hospital_id, patient_hash, model_version, input_hash,
+                output_hash, metadata_hash, proof_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proof["proof_id"],
+                hospital_id,
+                patient_hash,
+                proof["model_version"],
+                proof["input_hash"],
+                proof["output_hash"],
+                proof["metadata_hash"],
+                json.dumps(proof),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
+def submit_audit_proof(hospital_id: str, proof: dict) -> dict:
+    tier = "BASIC"
+    tx_seed = f"{hospital_id}:{proof['proof_id']}:{proof['signature']}:{datetime.now(timezone.utc).isoformat()}"
+    tx_id = hashlib.sha256(tx_seed.encode()).hexdigest()[:24]
+    with get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS total FROM audit_proofs WHERE hospital_id = ?",
+            (hospital_id,),
+        ).fetchone()["total"] + 1
+        if count >= 25:
+            tier = "PRIORITY"
+        elif count >= 10:
+            tier = "PREMIUM"
+        conn.execute(
+            """
+            INSERT INTO audit_proofs (
+                hospital_id, weight_hash, signature, tx_id, tier, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                hospital_id,
+                proof["proof_id"],
+                proof["signature"],
+                tx_id,
+                tier,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    return {"tx_id": tx_id, "on_chain": False, "network": "local-audit", "tier": tier}
 
 
 def record_prediction(patient_hash: str, hospital_id: str, department: str, target_disease: str,
@@ -366,27 +587,6 @@ def get_current_model_release() -> dict:
         "release_note": MODEL_RELEASE_NOTES.get(MODEL_VERSION, "Custom TrustChain model release."),
         "available_versions": list(MODEL_RELEASE_NOTES.keys()),
     }
-    tier = "BASIC"
-    tx_seed = f"{hospital_id}:{proof['weight_hash']}:{proof['signature']}:{datetime.now(timezone.utc).isoformat()}"
-    tx_id = hashlib.sha256(tx_seed.encode()).hexdigest()[:24]
-    with get_db() as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) AS total FROM audit_proofs WHERE hospital_id = ?",
-            (hospital_id,),
-        ).fetchone()["total"] + 1
-        if count >= 25:
-            tier = "PRIORITY"
-        elif count >= 10:
-            tier = "PREMIUM"
-        conn.execute(
-            """
-            INSERT INTO audit_proofs (
-                hospital_id, weight_hash, signature, tx_id, tier, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (hospital_id, proof["weight_hash"], proof["signature"], tx_id, tier, datetime.now(timezone.utc).isoformat()),
-        )
-    return {"tx_id": tx_id, "on_chain": False, "network": "local-audit", "tier": tier}
 
 
 def format_prediction_row(row):
@@ -423,6 +623,41 @@ def preprocess_image(image_input) -> torch.Tensor:
         img_np = (img_np - mean) / std
         return torch.tensor(img_np, dtype=torch.float32).unsqueeze(0)
 
+
+def set_dropout_training(module: torch.nn.Module):
+    for child in module.modules():
+        if isinstance(child, torch.nn.Dropout):
+            child.train()
+
+
+def predict_with_uncertainty(image_tensor, text_tensor, metadata_tensor, samples: int = 20) -> dict:
+    samples = max(2, min(samples, 50))
+    was_training = model.training
+    model.eval()
+    set_dropout_training(model)
+    probs = []
+    with torch.no_grad():
+        for _ in range(samples):
+            outputs = model(image_tensor, text_tensor, metadata_tensor)
+            probs.append(outputs["probabilities"][0].detach().cpu().numpy())
+    if was_training:
+        model.train()
+    else:
+        model.eval()
+
+    stacked = np.stack(probs, axis=0)
+    mean_probs = stacked.mean(axis=0)
+    std_probs = stacked.std(axis=0)
+    entropy = -(mean_probs * np.log(mean_probs + 1e-8) + (1 - mean_probs) * np.log(1 - mean_probs + 1e-8))
+    return {
+        "probabilities": mean_probs,
+        "std": std_probs,
+        "uncertainty_score": float(std_probs.max()),
+        "mean_uncertainty": float(std_probs.mean()),
+        "predictive_entropy": float(entropy.mean()),
+        "samples": samples,
+    }
+
 # Mapped labels for different departments
 DEPT_DISEASES = {
     "radiology": ["Normal Lungs", "Cardiomegaly", "Pleural Effusion", "Infiltration", "Atelectasis", "Pneumonia"],
@@ -450,6 +685,11 @@ if FASTAPI_AVAILABLE:
         epsilon_budget: float = Form(1.5),
         patient_id: str = Form("anonymous"),
         hospital_id: str = Form("hospital-demo"),
+        patient_age: str = Form(""),
+        patient_sex: str = Form(""),
+        study_description: str = Form(""),
+        mc_samples: int = Form(20),
+        uncertainty_threshold: float = Form(UNCERTAINTY_THRESHOLD),
         api_key: str = Depends(get_api_key),
     ):
         """
@@ -461,8 +701,16 @@ if FASTAPI_AVAILABLE:
         try:
             # 1. Read files and preprocess inputs
             image_bytes = await image.read()
+            image_hash = hashlib.sha256(image_bytes).hexdigest()
+            metadata = {
+                "age": patient_age,
+                "sex": patient_sex,
+                "study_description": study_description,
+            }
             if image.filename.lower().endswith(".dcm"):
                 try:
+                    dicom_metadata = extract_dicom_metadata(image_bytes)
+                    metadata = {**metadata, **{k: v for k, v in dicom_metadata.items() if v}}
                     img_pil = load_dicom(image_bytes)
                     image_tensor = preprocess_image(img_pil)
                 except Exception as dicom_err:
@@ -471,13 +719,13 @@ if FASTAPI_AVAILABLE:
                 image_tensor = preprocess_image(image_bytes)
             image_tensor = image_tensor.to(device)
             
-            text_tensor, token_words = tokenize_text(clinical_text, max_length=32)
+            text_tensor, token_words = tokenize_text(clinical_text, max_length=128)
             text_tensor = text_tensor.to(device)
+            metadata_tensor = metadata_to_tensor(metadata).to(device)
             
-            # 2. Run inference on joint network
-            with torch.no_grad():
-                outputs = model(image_tensor, text_tensor)
-                probs = outputs["probabilities"][0].cpu().numpy()
+            # 2. Run MC Dropout inference for predictive uncertainty
+            uncertainty = predict_with_uncertainty(image_tensor, text_tensor, metadata_tensor, samples=mc_samples)
+            probs = uncertainty["probabilities"]
                 
             # Fetch target class index for explainability
             dept_labels = DEPT_DISEASES.get(department.lower(), DEPT_DISEASES["radiology"])
@@ -541,6 +789,7 @@ if FASTAPI_AVAILABLE:
             stemi_pred = next((p for p in predictions if p["label"] == "ST-Elevation Infarction (STEMI)"), None)
             
             highest_prob = predictions[0]["prob"]
+            manual_review_required = uncertainty["uncertainty_score"] >= uncertainty_threshold
             
             if stemi_pred and stemi_pred["prob"] > 0.90:
                 escalation_level = "CRITICAL ESCALATION"
@@ -549,6 +798,12 @@ if FASTAPI_AVAILABLE:
                     f"Model prediction indicates possible ST-Elevation Myocardial Infarction (STEMI) with {(stemi_pred['prob']*100):.1f}% confidence. "
                     "Attention maps highlight anterior precordial leads. Immediate cardiologist review is required. "
                     "This result is for decision support and not a definitive diagnosis."
+                )
+            elif manual_review_required:
+                escalation_level = "MANUAL_REVIEW_REQUIRED"
+                recommendation = (
+                    "Predictive uncertainty is above the clinical safety threshold. "
+                    "A clinician must verify this result before action."
                 )
             elif highest_prob > 0.85:
                 escalation_level = "PROCEED"
@@ -562,8 +817,23 @@ if FASTAPI_AVAILABLE:
                 
             # Compute actual Epsilon differential privacy allocation based on target budget
             noise_scale = 2.2 / max(0.1, epsilon_budget)
-            proof = generate_proof(department, clinical_text)
             patient_hash = anonymize_patient_id(patient_id)
+            output_payload = {
+                "target_disease": target_disease,
+                "highest_probability": float(highest_prob),
+                "predictions": predictions,
+                "uncertainty": uncertainty,
+                "manual_review_required": manual_review_required,
+                "escalation_level": escalation_level,
+            }
+            proof = generate_proof(
+                department=department,
+                note=clinical_text,
+                image_hash=image_hash,
+                output=output_payload,
+                metadata=metadata,
+            )
+            record_inference_proof(hospital_id, patient_hash, proof)
             audit_submission = asyncio.create_task(submit_audit_proof_async(hospital_id, proof))
             asyncio.create_task(broadcast_progress({
                 "event": "inference_finished",
@@ -573,7 +843,7 @@ if FASTAPI_AVAILABLE:
                 "confidence": float(highest_prob)
             }))
             blockchain_tx = {
-                "tx_id": hashlib.sha256(f"{hospital_id}:{proof['weight_hash']}".encode()).hexdigest()[:24],
+                "tx_id": hashlib.sha256(f"{hospital_id}:{proof['proof_id']}".encode()).hexdigest()[:24],
                 "network": "local-audit",
                 "status": "queued",
                 "tier": "BASIC"
@@ -599,8 +869,18 @@ if FASTAPI_AVAILABLE:
                 "escalation": {
                     "level": escalation_level,
                     "recommendation": recommendation,
-                    "confidence": float(highest_prob)
+                    "confidence": float(highest_prob),
+                    "manual_review_required": manual_review_required,
                 },
+                "uncertainty": {
+                    "score": uncertainty["uncertainty_score"],
+                    "mean": uncertainty["mean_uncertainty"],
+                    "predictive_entropy": uncertainty["predictive_entropy"],
+                    "threshold": float(uncertainty_threshold),
+                    "mc_samples": uncertainty["samples"],
+                    "manual_review_required": manual_review_required,
+                },
+                "metadata": metadata,
                 "privacy": {
                     "epsilon": float(epsilon_budget),
                     "noise_multiplier": float(noise_scale),
@@ -618,6 +898,7 @@ if FASTAPI_AVAILABLE:
                     "block_id": 1089,
                     "zk_proof": proof["zk_proof"],
                     "contract_status": "COMPLIANT",
+                    "proof_id": proof["proof_id"],
                     "proof_details": proof,
                 }
             }
@@ -633,6 +914,11 @@ if FASTAPI_AVAILABLE:
         epsilon_budget: float = Form(1.5),
         patient_id: str = Form("anonymous"),
         hospital_id: str = Form("hospital-demo"),
+        patient_age: str = Form(""),
+        patient_sex: str = Form(""),
+        study_description: str = Form(""),
+        mc_samples: int = Form(20),
+        uncertainty_threshold: float = Form(UNCERTAINTY_THRESHOLD),
         api_key: str = Depends(get_api_key),
     ):
         return await diagnose_patient(
@@ -643,6 +929,11 @@ if FASTAPI_AVAILABLE:
             epsilon_budget=epsilon_budget,
             patient_id=patient_id,
             hospital_id=hospital_id,
+            patient_age=patient_age,
+            patient_sex=patient_sex,
+            study_description=study_description,
+            mc_samples=mc_samples,
+            uncertainty_threshold=uncertainty_threshold,
             api_key=api_key,
         )
 
@@ -687,6 +978,87 @@ if FASTAPI_AVAILABLE:
             "message": "Patient feedback received.",
             "fine_tune_status": fine_tune_status,
         }
+
+    @app.post("/hitl/review")
+    async def hitl_review(
+        proof_id: str = Form(...),
+        action: str = Form(...),
+        clinician_id: str = Form(...),
+        hospital_id: str = Form("hospital-demo"),
+        original_diagnosis: str = Form(""),
+        corrected_diagnosis: str = Form(""),
+        corrected_department: str = Form(""),
+        notes: str = Form(""),
+        api_key: str = Depends(get_api_key),
+    ):
+        enforce_rate_limit(api_key)
+        action = action.lower().strip()
+        if action not in {"verify", "overrule"}:
+            raise HTTPException(status_code=400, detail="action must be 'verify' or 'overrule'.")
+        if action == "overrule" and not corrected_diagnosis:
+            raise HTTPException(status_code=400, detail="corrected_diagnosis is required when action is overrule.")
+
+        with get_db() as conn:
+            proof = conn.execute(
+                "SELECT proof_id FROM inference_proofs WHERE proof_id = ?",
+                (proof_id,),
+            ).fetchone()
+            if proof is None:
+                raise HTTPException(status_code=404, detail="Inference proof not found.")
+            conn.execute(
+                """
+                INSERT INTO clinician_feedback (
+                    proof_id, hospital_id, clinician_id, action, original_diagnosis,
+                    corrected_diagnosis, corrected_department, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proof_id,
+                    hospital_id,
+                    clinician_id,
+                    action,
+                    original_diagnosis,
+                    corrected_diagnosis,
+                    corrected_department,
+                    notes,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            feedback_count = conn.execute(
+                "SELECT COUNT(*) AS total FROM clinician_feedback"
+            ).fetchone()["total"]
+
+        if feedback_count >= 50 and fine_tune_status["status"] != "running":
+            asyncio.create_task(trigger_rlhf_fine_tune())
+
+        return {
+            "success": True,
+            "proof_id": proof_id,
+            "action": action,
+            "stored_for_fine_tuning": True,
+            "feedback_count": feedback_count,
+            "fine_tune_status": fine_tune_status,
+        }
+
+    @app.get("/audit/inference/{proof_id}")
+    async def get_inference_proof(proof_id: str, api_key: str = Depends(get_api_key)):
+        enforce_rate_limit(api_key)
+        with get_db() as conn:
+            row = conn.execute(
+                """
+                SELECT proof_id, hospital_id, patient_hash, model_version, input_hash,
+                       output_hash, metadata_hash, proof_json, created_at
+                FROM inference_proofs
+                WHERE proof_id = ?
+                """,
+                (proof_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Inference proof not found.")
+        data = dict(row)
+        data["proof"] = json.loads(data.pop("proof_json"))
+        data["verified"] = verify_zk_proof(data["proof"])
+        return data
 
     @app.get("/fine_tune/status")
     async def fine_tune_status_route(api_key: str = Depends(get_api_key)):
@@ -750,7 +1122,7 @@ if FASTAPI_AVAILABLE:
                     # Preprocess image for model input
                     inp = preprocess_image(img).to(device)
                     # Create dummy text IDs
-                    dummy_txt = torch.zeros((1, 32), dtype=torch.long).to(device)
+                    dummy_txt = torch.zeros((1, 128), dtype=torch.long).to(device)
                     
                     # Target layer from final Vision Transformer Block
                     target_layer = [model.vit.blocks[-1]]
@@ -866,7 +1238,7 @@ if FASTAPI_AVAILABLE:
                     importance.append(float(score))
             else:
                 # Fallback to local tokenizer
-                text_tensor, token_words = tokenize_text(note, max_length=32)
+                text_tensor, token_words = tokenize_text(note, max_length=128)
                 tokens = [t for t in token_words if t not in ["[cls]", "[sep]", "[pad]"]]
                 importance = []
                 for w in tokens:
@@ -940,45 +1312,13 @@ if FASTAPI_AVAILABLE:
 
     @app.get("/benchmark")
     async def benchmark():
-        import evaluator
-        
-        # 1. Ablation benchmarks
-        ablation = evaluator.generate_ablation_benchmarks()
-        
-        # 2. Privacy-utility curves
-        privacy = evaluator.compute_privacy_tradeoff_curves()
-        
-        # 3. Federated convergence curves
-        federated = evaluator.compute_federated_convergence()
-        
-        # 4. Grad-CAM Faithfulness Deletion/Insertion simulated metrics
-        faithfulness = evaluator.compute_faithfulness_auc(0.85, None, None)
-        
-        # 5. DeLong's statistical validation parameters
-        # Compares Multimodal (Model A) vs Image-Only (Model B)
-        np.random.seed(42)
-        labels = np.random.choice([0, 1], size=500, p=[0.6, 0.4])
-        pred_a = labels * 0.45 + np.random.uniform(0.1, 0.45, size=500)
-        pred_b = labels * 0.30 + np.random.uniform(0.1, 0.55, size=500)
-        
-        delong_results = evaluator.delong_auc_covariance(labels, pred_a, pred_b)
-        
-        # 6. ECE Calibration values
-        ece_val, bin_accs, bin_confs, bin_sizes = evaluator.compute_ece(labels, pred_a)
-        
         return {
-            "success": True,
-            "ablation_benchmarks": ablation,
-            "privacy_utility": privacy,
-            "federated_convergence": federated,
-            "faithfulness": faithfulness,
-            "statistical_validation": {
-                "delong_test": delong_results,
-                "ece": float(ece_val),
-                "ece_bin_accs": bin_accs,
-                "ece_bin_confs": bin_confs,
-                "ece_bin_sizes": bin_sizes
-            }
+            "success": False,
+            "status": "not_evaluated",
+            "message": (
+                "Benchmark metrics are unavailable until a real held-out dataset is "
+                "run through evaluator.compute_multilabel_metrics()."
+            ),
         }
 
 if __name__ == "__main__":

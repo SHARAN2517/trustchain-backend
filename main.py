@@ -550,17 +550,14 @@ def health():
 def system_status():
     return {
         "phases":{
-            "phase1":"PASS — 195M params ViT+ClinicalBERT loss 0.10",
-            "phase2":"PASS — 4 hospitals FedAvg loss 0.1799",
-            "phase3":"PASS — MultiKrum score 2.0e+09 caught",
-            "phase4":"PASS — 4/4 hospitals ZK verified",
-            "phase5":"PASS — XAI co-pilot operational",
+            "inference":"configured",
+            "federated_learning":"code_available_not_evaluated",
+            "byzantine_defense":"code_available_not_evaluated",
+            "audit_proofs":"local_audit_enabled",
+            "explainability":"configured",
         },
-        "accuracy":{
-            "Radiology":"63.4%","Oncology":"89.7%",
-            "Pediatrics":"70.0%","Cardiology":"90.0%","overall":"78.3%"
-        },
-        "modality_detector":"99.8% accuracy — prevents wrong-modality predictions",
+        "accuracy":"not_evaluated",
+        "modality_detector": MODEL_STATUS.get("modality_detector", "not loaded"),
         "improvements":[
             "Modality detection before specialist routing",
             "OOD detection — escalates uncertain predictions",
@@ -569,7 +566,7 @@ def system_status():
             "Medical logic constraints",
         ],
         "compliance":["DPDP Act 2023","HIPAA","GDPR","PIPL"],
-        "byzantine":{"detection_rate":"100%","krum_score_gap":"2.0e+09 vs 2.0e+00"},
+        "byzantine":"not_evaluated",
         "rlhf_store":len(feedback_store),
         "model_status":MODEL_STATUS,
     }
@@ -823,44 +820,12 @@ async def reputation(hospital_id: str):
 
 @app.get("/benchmark")
 async def benchmark():
-    import evaluator
-    
-    # 1. Ablation benchmarks
-    ablation = evaluator.generate_ablation_benchmarks()
-    
-    # 2. Privacy-utility curves
-    privacy = evaluator.compute_privacy_tradeoff_curves()
-    
-    # 3. Federated convergence curves
-    federated = evaluator.compute_federated_convergence()
-    
-    # 4. Grad-CAM Faithfulness Deletion/Insertion simulated metrics
-    faithfulness = evaluator.compute_faithfulness_auc(0.85, None, None)
-    
-    # 5. DeLong's statistical validation parameters
-    # Compares Multimodal (Model A) vs Image-Only (Model B)
-    np.random.seed(42)
-    labels = np.random.choice([0, 1], size=500, p=[0.6, 0.4])
-    pred_a = labels * 0.45 + np.random.uniform(0.1, 0.45, size=500)
-    pred_b = labels * 0.30 + np.random.uniform(0.1, 0.55, size=500)
-    
-    delong_results = evaluator.delong_auc_covariance(labels, pred_a, pred_b)
-    
-    # 6. ECE Calibration values
-    ece_val, bin_accs, bin_confs, bin_sizes = evaluator.compute_ece(labels, pred_a)
-    
     return {
-        "success": True,
-        "ablation_benchmarks": ablation,
-        "privacy_utility": privacy,
-        "federated_convergence": federated,
-        "faithfulness": faithfulness,
-        "statistical_validation": {
-            "delong_test": delong_results,
-            "ece": float(ece_val),
-            "ece_bin_accs": bin_accs,
-            "ece_bin_confs": bin_confs,
-            "ece_bin_sizes": bin_sizes
-        }
+        "success": False,
+        "status": "not_evaluated",
+        "message": (
+            "Benchmark metrics are unavailable until a real held-out dataset is "
+            "run through evaluator.compute_multilabel_metrics()."
+        ),
     }
 

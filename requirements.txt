@@ -10,3 +10,4 @@ pydicom==2.4.4
 grad-cam==1.5.5
 opencv-python==4.10.0.84
 scipy==1.11.4
+transformers==4.36.2
