@@ -829,3 +829,370 @@ async def benchmark():
         ),
     }
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HARDENED MODULE INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Lazy Imports (graceful if missing on older deploys) ──
+
+def _get_security():
+    try:
+        import security
+        return security
+    except ImportError:
+        return None
+
+def _get_governance():
+    try:
+        import governance
+        return governance
+    except ImportError:
+        return None
+
+def _get_metrics_module():
+    try:
+        import metrics
+        return metrics
+    except ImportError:
+        return None
+
+def _get_model_registry():
+    try:
+        import model_registry as mr
+        return mr
+    except ImportError:
+        return None
+
+def _get_task_manager():
+    try:
+        import task_manager as tm
+        return tm
+    except ImportError:
+        return None
+
+def _get_zkproofs():
+    try:
+        import zkproofs
+        return zkproofs
+    except ImportError:
+        return None
+
+def _get_byzantine():
+    try:
+        import byzantine
+        return byzantine
+    except ImportError:
+        return None
+
+
+# ── Auth Endpoints ──
+
+@app.post("/auth/register")
+async def auth_register(
+    email: str = Form(...),
+    password: str = Form(...),
+    hospital_id: str = Form(...),
+    role: str = Form("DOCTOR"),
+    X_API_Key: Optional[str] = None,
+):
+    sec = _get_security()
+    if not sec:
+        raise HTTPException(500, "Security module unavailable")
+    store = sec.get_user_store()
+    user_id = f"USR-{hashlib.sha256(email.encode()).hexdigest()[:8].upper()}"
+    try:
+        user = store.create_user(user_id, email, password, hospital_id, role)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    # Log audit event
+    gov = _get_governance()
+    if gov:
+        audit = gov.AuditTrailLogger()
+        audit.log(user_id, "REGISTER", "/auth/register", details={"role": role, "hospital": hospital_id})
+    return {"status": "registered", "user_id": user["user_id"], "api_key": user["api_key"]}
+
+
+@app.post("/auth/login")
+async def auth_login(
+    email: str = Form(...),
+    password: str = Form(...),
+):
+    sec = _get_security()
+    if not sec:
+        raise HTTPException(500, "Security module unavailable")
+    store = sec.get_user_store()
+    user = store.authenticate(email, password)
+    if not user:
+        raise HTTPException(401, "Invalid credentials")
+    auth_mgr = sec.get_auth_manager()
+    access_token = auth_mgr.create_access_token(user["user_id"], user["hospital_id"], user["role"])
+    refresh_token = auth_mgr.create_refresh_token(user["user_id"])
+    # Log audit
+    gov = _get_governance()
+    if gov:
+        audit = gov.AuditTrailLogger()
+        audit.log(user["user_id"], "LOGIN", "/auth/login")
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": user,
+    }
+
+
+# ── Governance Endpoints ──
+
+@app.get("/governance/audit")
+async def governance_audit(
+    actor_id: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    action: Optional[str] = None,
+    limit: int = 50,
+    X_API_Key: Optional[str] = None,
+):
+    gov = _get_governance()
+    if not gov:
+        raise HTTPException(500, "Governance module unavailable")
+    audit = gov.AuditTrailLogger()
+    entries = audit.query(actor_id=actor_id, patient_id=patient_id, action=action, limit=limit)
+    return {"entries": entries, "count": len(entries)}
+
+
+@app.get("/governance/audit/verify")
+async def governance_verify_chain(limit: int = 1000, X_API_Key: Optional[str] = None):
+    gov = _get_governance()
+    if not gov:
+        raise HTTPException(500, "Governance module unavailable")
+    audit = gov.AuditTrailLogger()
+    result = audit.verify_chain(limit=limit)
+    return result
+
+
+@app.post("/governance/consent")
+async def governance_grant_consent(
+    patient_id: str = Form(...),
+    hospital_id: str = Form(...),
+    consent_type: str = Form(...),
+    expires_days: int = Form(365),
+    X_API_Key: Optional[str] = None,
+):
+    gov = _get_governance()
+    if not gov:
+        raise HTTPException(500, "Governance module unavailable")
+    mgr = gov.ConsentManager()
+    try:
+        consent_id = mgr.grant_consent(patient_id, hospital_id, consent_type, expires_days)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"consent_id": consent_id, "status": "granted"}
+
+
+@app.get("/governance/consent/{patient_id}")
+async def governance_check_consent(patient_id: str, consent_type: Optional[str] = None, X_API_Key: Optional[str] = None):
+    gov = _get_governance()
+    if not gov:
+        raise HTTPException(500, "Governance module unavailable")
+    mgr = gov.ConsentManager()
+    if consent_type:
+        has = mgr.check_consent(patient_id, consent_type)
+        return {"patient_id": patient_id, "consent_type": consent_type, "active": has}
+    else:
+        consents = mgr.get_patient_consents(patient_id)
+        return {"patient_id": patient_id, "consents": consents}
+
+
+@app.get("/governance/rbac")
+async def governance_rbac(role: str, endpoint: str, X_API_Key: Optional[str] = None):
+    gov = _get_governance()
+    if not gov:
+        raise HTTPException(500, "Governance module unavailable")
+    policy = gov.RBACPolicy()
+    allowed = policy.check_access(role, endpoint)
+    return {"role": role, "endpoint": endpoint, "allowed": allowed}
+
+
+# ── Metrics Endpoints ──
+
+@app.get("/metrics/hospital/{hospital_id}")
+async def metrics_hospital(hospital_id: str, X_API_Key: Optional[str] = None):
+    m = _get_metrics_module()
+    if not m:
+        raise HTTPException(500, "Metrics module unavailable")
+    store = m.HospitalMetricsStore()
+    return store.get_hospital_summary(hospital_id)
+
+
+@app.get("/metrics/federation")
+async def metrics_federation(X_API_Key: Optional[str] = None):
+    m = _get_metrics_module()
+    if not m:
+        raise HTTPException(500, "Metrics module unavailable")
+    store = m.HospitalMetricsStore()
+    return store.get_federation_overview()
+
+
+@app.get("/metrics/privacy-budget")
+async def metrics_privacy_budget(X_API_Key: Optional[str] = None):
+    m = _get_metrics_module()
+    if not m:
+        raise HTTPException(500, "Metrics module unavailable")
+    store = m.HospitalMetricsStore()
+    return store.get_privacy_budget_report()
+
+
+@app.get("/metrics/round/{round_id}")
+async def metrics_round(round_id: int, X_API_Key: Optional[str] = None):
+    m = _get_metrics_module()
+    if not m:
+        raise HTTPException(500, "Metrics module unavailable")
+    store = m.HospitalMetricsStore()
+    return store.get_round_details(round_id)
+
+
+# ── Model Registry Endpoints ──
+
+@app.get("/models/registry")
+async def models_list(status: Optional[str] = None, X_API_Key: Optional[str] = None):
+    mr = _get_model_registry()
+    if not mr:
+        raise HTTPException(500, "Model registry unavailable")
+    registry = mr.ModelRegistry()
+    versions = registry.list_versions(status=status)
+    current = registry.get_current()
+    return {"versions": versions, "deployed": current}
+
+
+@app.post("/models/promote/{version}")
+async def models_promote(version: str, X_API_Key: Optional[str] = None):
+    mr = _get_model_registry()
+    if not mr:
+        raise HTTPException(500, "Model registry unavailable")
+    registry = mr.ModelRegistry()
+    try:
+        result = registry.promote(version, actor_id="api")
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@app.post("/models/rollback/{version}")
+async def models_rollback(version: str, reason: Optional[str] = None, X_API_Key: Optional[str] = None):
+    mr = _get_model_registry()
+    if not mr:
+        raise HTTPException(500, "Model registry unavailable")
+    registry = mr.ModelRegistry()
+    try:
+        result = registry.rollback(version, actor_id="api", reason=reason)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@app.get("/models/compare")
+async def models_compare(v1: str, v2: str, X_API_Key: Optional[str] = None):
+    mr = _get_model_registry()
+    if not mr:
+        raise HTTPException(500, "Model registry unavailable")
+    registry = mr.ModelRegistry()
+    try:
+        return registry.compare_versions(v1, v2)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ── Task Manager Endpoints ──
+
+@app.get("/tasks")
+async def tasks_list(status: Optional[str] = None, X_API_Key: Optional[str] = None):
+    tm = _get_task_manager()
+    if not tm:
+        raise HTTPException(500, "Task manager unavailable")
+    mgr = tm.get_task_manager()
+    return {"tasks": mgr.list_tasks(status=status)}
+
+
+@app.get("/tasks/{task_id}")
+async def tasks_status(task_id: str, X_API_Key: Optional[str] = None):
+    tm = _get_task_manager()
+    if not tm:
+        raise HTTPException(500, "Task manager unavailable")
+    mgr = tm.get_task_manager()
+    status = mgr.get_status(task_id)
+    if not status:
+        raise HTTPException(404, f"Task {task_id} not found")
+    return status
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def tasks_cancel(task_id: str, X_API_Key: Optional[str] = None):
+    tm = _get_task_manager()
+    if not tm:
+        raise HTTPException(500, "Task manager unavailable")
+    mgr = tm.get_task_manager()
+    cancelled = mgr.cancel(task_id)
+    return {"task_id": task_id, "cancelled": cancelled}
+
+
+# ── ZK Proofs Endpoint ──
+
+@app.post("/zkproof/generate")
+async def zkproof_generate(
+    weight_hash: str = Form(...),
+    hospital_id: str = Form(...),
+    round_id: int = Form(...),
+    X_API_Key: Optional[str] = None,
+):
+    zk = _get_zkproofs()
+    if not zk:
+        raise HTTPException(500, "ZK proofs module unavailable")
+    engine = zk.ZKProofEngine(use_schnorr=True)
+    proof = engine.generate_model_integrity_proof(weight_hash, hospital_id, round_id)
+    # Remove internal randomness from API response
+    proof.pop("_internal_randomness", None)
+    return proof
+
+
+@app.post("/zkproof/verify")
+async def zkproof_verify(proof: dict):
+    zk = _get_zkproofs()
+    if not zk:
+        raise HTTPException(500, "ZK proofs module unavailable")
+    engine = zk.ZKProofEngine(use_schnorr=True)
+    valid = engine.verify_model_integrity_proof(proof)
+    return {"valid": valid}
+
+
+# ── Byzantine Aggregation Info ──
+
+@app.get("/federation/aggregators")
+async def federation_aggregators(X_API_Key: Optional[str] = None):
+    byz = _get_byzantine()
+    if not byz:
+        return {"available": False, "methods": []}
+    return {
+        "available": True,
+        "methods": ["fedavg", "krum", "fltrust", "bulyan"],
+        "descriptions": {
+            "fedavg": "Baseline weighted average — no defense",
+            "krum": "Multi-Krum — selects clients with lowest pairwise distance",
+            "fltrust": "Server-rooted trust scoring via cosine similarity",
+            "bulyan": "Two-phase: Krum selection + coordinate-wise trimmed mean",
+        }
+    }
+
+
+# ── WebSocket for Tasks ──
+
+try:
+    from fastapi import WebSocket
+
+    @app.websocket("/ws/tasks/{task_id}")
+    async def ws_tasks(websocket: WebSocket, task_id: str):
+        tm = _get_task_manager()
+        if not tm:
+            await websocket.close(code=1011)
+            return
+        mgr = tm.get_task_manager()
+        await tm.task_websocket_endpoint(websocket, task_id, mgr)
+except ImportError:
+    pass

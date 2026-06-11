@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Trustchain-Med Frontend (Minimal)</title>
+  <link rel="stylesheet" href="style.css">
+  <meta name="description" content="Minimal frontend to test Trustchain backend">
+</head>
+<body>
+  <main>
+    <h1>Trustchain-Med Frontend (Minimal)</h1>
+
+    <label>Backend URL
+      <input id="backendUrl" type="text" value="https://trustchain-backend-qihp.onrender.com"/>
+    </label>
+
+    <div class="buttons">
+      <button id="btnProofs">GET /blockchain/proofs</button>
+      <button id="btnVersion">GET /model/version</button>
+    </div>
+
+    <pre id="output">Ready.</pre>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

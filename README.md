@@ -80,6 +80,20 @@ backend/
     For local API wiring only, set `TRUSTCHAIN_ALLOW_RANDOM_WEIGHTS=1`; do not
     use that mode for demos, validation, or clinical inference.
 
+Environment variable for remote backend
+--------------------------------------
+
+If you need clients or services to point to a deployed backend, set the
+`BACKEND_URL` environment variable. An example file `.env.example` is included.
+
+Example:
+
+```bash
+export BACKEND_URL=https://trustchain-backend-qihp.onrender.com
+# Windows (PowerShell)
+$env:BACKEND_URL = 'https://trustchain-backend-qihp.onrender.com'
+```
+
 ---
 
 ## Training

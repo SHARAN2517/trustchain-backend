@@ -103,36 +103,40 @@ class FlowerMultimodalClient:
 
 class SimulatedFederation:
     """
-    Simulates multi-client federated training rounds.
-    Used for local deployment validations when Flower network orchestrator is inactive.
+    Enhanced simulated multi-client federated training with:
+      - Byzantine-robust aggregation (Krum, FLTrust, Bulyan, FedAvg)
+      - Poisoning detection (composing verdicts → aggregator weights)
+      - Per-round metrics tracking
     """
-    def __init__(self, central_model, client_loaders, val_loader, lr=0.01):
+    def __init__(self, central_model, client_loaders, val_loader, lr=0.01,
+                 aggregation_method="fedavg", byzantine_f=1):
         self.central_model = central_model
         self.client_loaders = client_loaders
         self.val_loader = val_loader
         self.lr = lr
-        
-    def aggregate_parameters(self, client_parameters):
-        """
-        Federated Averaging (FedAvg):
-        Averages model weight parameters submitted by client nodes.
-        """
-        aggregated_weights = []
-        num_clients = len(client_parameters)
-        
-        for layer_idx in range(len(client_parameters[0])):
-            layer_tensors = [client_parameters[client_idx][layer_idx] for client_idx in range(num_clients)]
-            averaged_layer = np.mean(layer_tensors, axis=0)
-            aggregated_weights.append(averaged_layer)
-            
-        return aggregated_weights
+        self.aggregation_method = aggregation_method
+        self.byzantine_f = byzantine_f
+        self.round_history = []
+
+        # Import defense modules (optional — graceful if missing)
+        try:
+            from byzantine import aggregate as byz_aggregate
+            self._aggregate = byz_aggregate
+        except ImportError:
+            self._aggregate = None
+
+        try:
+            from poisoning_detector import EnsemblePoisoningDetector
+            self._detector = EnsemblePoisoningDetector()
+        except ImportError:
+            self._detector = None
 
     def _squared_distance(self, params_a, params_b):
         """Compute squared Euclidean distance between two sets of model parameters."""
         return sum(np.sum((a - b) ** 2) for a, b in zip(params_a, params_b))
 
     def krum_score(self, candidate_idx, client_parameters, f=1):
-        """Assign a Krum score by summing the smallest pairwise distances."""
+        """Assign a Krum score by summing the smallest pairwise distances (legacy helper)."""
         distances = []
         for idx, params in enumerate(client_parameters):
             if idx == candidate_idx:
@@ -141,33 +145,56 @@ class SimulatedFederation:
         distances.sort()
         return sum(distances[: max(0, len(distances) - f - 2)])
 
-    def robust_aggregate(self, client_parameters, f=1, m=None):
-        """Selects robust client updates using Multi-Krum to mitigate Byzantine attacks."""
-        num_clients = len(client_parameters)
-        if num_clients < 3 + f:
-            return self.aggregate_parameters(client_parameters)
+    def aggregate_parameters(self, client_parameters, method=None, **kwargs):
+        """
+        Aggregates client parameters using the configured strategy.
 
-        if m is None:
-            m = max(1, num_clients - 2 * f - 2)
+        Pipeline: poisoning_detector → verdicts → byzantine aggregator.
+        """
+        method = method or self.aggregation_method
 
-        scores = [(idx, self.krum_score(idx, client_parameters, f)) for idx in range(num_clients)]
-        selected = [idx for idx, _ in sorted(scores, key=lambda x: x[1])[:m]]
-        selected_parameters = [client_parameters[idx] for idx in selected]
-        return self.aggregate_parameters(selected_parameters)
+        # Step 1: Run poisoning detection (if available)
+        verdicts = {}
+        detection_report = {}
+        if self._detector is not None:
+            full_report = self._detector.detect(client_parameters)
+            verdicts = {idx: info["verdict"] for idx, info in full_report.items()}
+            detection_report = {idx: info["risk_score"] for idx, info in full_report.items()}
+            rejected = [idx for idx, v in verdicts.items() if v == "MALICIOUS"]
+            if rejected:
+                print(f"  [DEFENSE] Poisoning detected: clients {rejected} marked MALICIOUS")
 
-    def run_round(self, round_idx):
-        """Executes a single federated learning round."""
-        print(f"\n--- Starting Federated Round {round_idx} ---")
+        # Step 2: Aggregate using byzantine-robust strategy
+        if self._aggregate is not None:
+            aggregated, meta = self._aggregate(
+                method, client_parameters,
+                f=self.byzantine_f, verdicts=verdicts, **kwargs,
+            )
+            meta["poisoning_verdicts"] = verdicts
+            meta["risk_scores"] = detection_report
+            return aggregated, meta
+        else:
+            # Fallback to basic FedAvg
+            aggregated = []
+            n = len(client_parameters)
+            for layer_idx in range(len(client_parameters[0])):
+                layers = [client_parameters[c][layer_idx] for c in range(n)]
+                aggregated.append(np.mean(layers, axis=0))
+            return aggregated, {"method": "fedavg_fallback", "poisoning_verdicts": verdicts}
+
+    def run_round(self, round_idx, method=None):
+        """Executes a single federated learning round with defense pipeline."""
+        method = method or self.aggregation_method
+        print(f"\n--- Federated Round {round_idx} (aggregation: {method}) ---")
         client_updates = []
-        
-        # Instantiate localized client models and extract parameter weights
+        client_metrics = []
+
         global_params = [val.cpu().numpy() for _, val in self.central_model.state_dict().items()]
-        
+
         for i, client_loader in enumerate(self.client_loaders):
-            # Create isolated copy of main model to simulate decentralized data silo
             local_model = copy.deepcopy(self.central_model)
             local_optimizer = torch.optim.SGD(local_model.parameters(), lr=self.lr)
-            
+
             client = FlowerMultimodalClient(
                 model=local_model,
                 train_loader=client_loader,
@@ -175,26 +202,41 @@ class SimulatedFederation:
                 optimizer=local_optimizer,
                 client_id=f"hospital_{i+1}"
             )
-            
-            # Fit client local model
+
             new_params, data_size, metrics = client.fit(global_params, config={})
-            print(f"Hospital Node {i+1} training -> Local Loss: {metrics['loss']:.4f}, Accuracy: {metrics['accuracy']:.4f}")
+            print(f"  Hospital {i+1}: loss={metrics['loss']:.4f}, acc={metrics['accuracy']:.4f}")
             client_updates.append(new_params)
-            
-        # Global Server aggregation with Byzantine-robust Multi-Krum
-        aggregated_params = self.robust_aggregate(client_updates, f=min(1, max(1, len(client_updates) // 4)))
-        
-        # Update the central server model with new weights
+            client_metrics.append(metrics)
+
+        # Byzantine-robust aggregation with poisoning detection
+        aggregated_params, agg_meta = self.aggregate_parameters(
+            client_updates, method=method,
+        )
+
+        # Update central model
         params_dict = zip(self.central_model.state_dict().keys(), aggregated_params)
         state_dict = {k: torch.tensor(v) for k, v in params_dict}
         self.central_model.load_state_dict(state_dict, strict=True)
-        
-        # Central evaluation
+
+        # Evaluate
         eval_optimizer = torch.optim.SGD(self.central_model.parameters(), lr=self.lr)
-        eval_client = FlowerMultimodalClient(self.central_model, self.val_loader, self.val_loader, eval_optimizer)
-        loss, size, metrics = eval_client.evaluate(aggregated_params, config={})
-        print(f"Global Aggregated Model -> Evaluation Loss: {loss:.4f}, Accuracy: {metrics['accuracy']:.4f}")
-        return loss, metrics['accuracy']
+        eval_client = FlowerMultimodalClient(
+            self.central_model, self.val_loader, self.val_loader, eval_optimizer,
+        )
+        loss, size, eval_metrics = eval_client.evaluate(aggregated_params, config={})
+        print(f"  Global Model: loss={loss:.4f}, acc={eval_metrics['accuracy']:.4f}")
+        print(f"  Aggregation: {agg_meta.get('method', method)}")
+
+        round_record = {
+            "round": round_idx,
+            "method": agg_meta.get("method", method),
+            "loss": loss,
+            "accuracy": eval_metrics["accuracy"],
+            "client_metrics": client_metrics,
+            "aggregation_meta": agg_meta,
+        }
+        self.round_history.append(round_record)
+        return loss, eval_metrics["accuracy"], agg_meta
 
 
 # Standalone integration entry point for Flower server setup
