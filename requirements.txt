@@ -11,3 +11,10 @@ grad-cam==1.5.5
 opencv-python==4.10.0.84
 scipy==1.11.4
 transformers==4.36.2
+
+# Senior-Level Production Refinements
+opacus==1.4.0                 # Differential Privacy (DP-SGD)
+onnx==1.14.1                  # ONNX export for TensorRT/OpenVINO
+onnxruntime==1.16.0           # ONNX runtime for inference
+shap==0.44.1                  # Explainability (SHAP values)
+tensorboard==2.14.0           # Training visualization
